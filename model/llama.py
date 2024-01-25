@@ -8,6 +8,7 @@ from modelutils import quantize_model, quantize_model_gptq, add_act_quant_wrappe
 from parallel_utils import map_layers_to_multi_gpus
 from LMClass import LMClass
 import lm_eval
+from lm_eval import tasks, evaluator
 from eval import pattern_match
 
 
@@ -19,13 +20,16 @@ def get_llama(model):
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
     from transformers import LlamaForCausalLM
+    print(f"Load fp16 model from {model} ...")
     model = LlamaForCausalLM.from_pretrained(model, torch_dtype=torch.float16)
-    model.seqlen = 2048
+    #model.seqlen = 2048
+    model.seqlen = 4096 # llama2
     return model
 
 if __name__ == '__main__':
     import argparse
     from datautils import *
+    import pdb;pdb.set_trace()
 
     parser = argparse.ArgumentParser()
 
@@ -134,8 +138,6 @@ if __name__ == '__main__':
     parser.add_argument(
         "--eval_ppl", action="store_true",
         help='Whether to evaluate perplexity.'
-    )
-    parser.add_argument(
         "--eval_common_sense", action="store_true",
         help='Whether to evaluate zero-shot accuray on commonsense reasoning tasks.'
     )
@@ -154,6 +156,10 @@ if __name__ == '__main__':
     parser.add_argument(
         '--save_dir', type=str, default='./saved',
         help='Path to store the reordering indices and quantized weights.'
+    )
+    parser.add_argument(
+        '--load_qmodel', type=str, default='',
+        help='Path to load the quantized model.'
     )
     
     args = parser.parse_args()
@@ -211,21 +217,29 @@ if __name__ == '__main__':
             scales = torch.load(f'../saved/{model_str}_scales_{args.dataset}_{args.act_group_size}.pt')
     else:
         scales = defaultdict(lambda: None)
+
+
+    if args.load_qmodel == '':
+        if args.abits < 16:
+            print("Inserting activations quantizers ...")
+            model = add_act_quant_wrapper(model, device=DEV, args=args, scales=scales)
+
+        if args.wbits < 16:
+            print("Quantizing...")
+            if args.use_gptq:
+                dataloader, testloader = get_loaders(
+                    args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
+                )
+                model = quantize_model_gptq(model, device=DEV, args=args, dataloader=dataloader)
+            else:
+                model = quantize_model(model, device=DEV, args=args)
+        # save model
+        if args.save_dir:
+            print(f"full qmodel is saved at {args.save_dir}/")
+            torch.save(model, f'{args.save_dir}/{model_name}_w{args.wbits}a{args.abits}_{args.dataset}.pt')
+    else:
+        model = torch.load(args.load_qmodel)
     
-    if args.abits < 16:
-        print("Inserting activations quantizers ...")
-        model = add_act_quant_wrapper(model, device=DEV, args=args, scales=scales)
-
-    if args.wbits < 16:
-        print("Quantizing...")
-        if args.use_gptq:
-            dataloader, testloader = get_loaders(
-                args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            model = quantize_model_gptq(model, device=DEV, args=args, dataloader=dataloader)
-        else:
-            model = quantize_model(model, device=DEV, args=args)
-
     if args.eval_ppl:
         datasets = ['wikitext2', 'ptb', 'c4', 'ptb-new', 'c4-new']
         for dataset in datasets:

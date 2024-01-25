@@ -47,13 +47,17 @@ def get_ptb(nsamples, seed, seqlen, model, tokenizer):
     return trainloader, testenc
 
 def get_c4(nsamples, seed, seqlen, model, tokenizer):
-    from datasets import load_dataset
+    from datasets import load_dataset, VerificationMode
+    """
     traindata = load_dataset(
         'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train'
     )
     valdata = load_dataset(
         'allenai/c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation'
     )
+    """
+    traindata = load_dataset("json", data_files="/data/datasets/c4/en/c4-train.00000-of-01024.json.gz", split='train', verification_mode=VerificationMode.NO_CHECKS)
+    valdata = load_dataset("json", data_files="/data/datasets/c4/en/c4-validation.00000-of-00008.json.gz", split='train', verification_mode=VerificationMode.NO_CHECKS)
     import random
     random.seed(seed)
     trainloader = []
@@ -110,13 +114,17 @@ def get_ptb_new(nsamples, seed, seqlen, model, tokenizer):
     return trainloader, testenc
 
 def get_c4_new(nsamples, seed, seqlen, model, tokenizer):
-    from datasets import load_dataset
+    from datasets import load_dataset, VerificationMode
+    """
     traindata = load_dataset(
         'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train'
     )
     valdata = load_dataset(
         'allenai/c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation'
     )
+    """
+    traindata = load_dataset("json", data_files="/data/datasets/c4/en/c4-train.00000-of-01024.json.gz", split='train', verification_mode=VerificationMode.NO_CHECKS)
+    valdata = load_dataset("json", data_files="/data/datasets/c4/en/c4-validation.00000-of-00008.json.gz", split='train', verification_mode=VerificationMode.NO_CHECKS)
 
     import random
     random.seed(seed)
