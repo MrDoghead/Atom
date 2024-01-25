@@ -138,6 +138,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--eval_ppl", action="store_true",
         help='Whether to evaluate perplexity.'
+    parser.add_argument(
         "--eval_common_sense", action="store_true",
         help='Whether to evaluate zero-shot accuray on commonsense reasoning tasks.'
     )
