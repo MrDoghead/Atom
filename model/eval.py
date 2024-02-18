@@ -22,7 +22,7 @@ def llama_eval(model, testenc, dev):
     dtype = next(iter(model.parameters())).dtype
     inps = torch.zeros(
         (nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
-    )
+    ) # 三维，记录每个sample下的输入张量（二维）
     cache = {'i': 0, 'attention_mask': None}
 
     class Catcher(nn.Module):
@@ -30,14 +30,14 @@ def llama_eval(model, testenc, dev):
             super().__init__()
             self.module = module
         def forward(self, inp, **kwargs):
-            inps[cache['i']] = inp
+            inps[cache['i']] = inp # 二维，已经过emb
             cache['i'] += 1
             cache['attention_mask'] = kwargs['attention_mask']
             cache['position_ids'] = kwargs['position_ids']
             raise ValueError
     layers[0] = Catcher(layers[0])
     for i in range(nsamples):
-        batch = testenc[:, (i * model.seqlen):((i + 1) * model.seqlen)].to(dev)
+        batch = testenc[:, (i * model.seqlen):((i + 1) * model.seqlen)].to(dev) # 二维切片
         try:
             model(batch)
         except ValueError:
@@ -53,9 +53,9 @@ def llama_eval(model, testenc, dev):
     position_ids = cache['position_ids']
 
     for i in tqdm(range(len(layers))):
-        layer = layers[i].to(dev)
+        layer = layers[i].to(dev) # 一个QLlamaDecoderLayer
         for j in range(nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0] # 收集每一个sample下的输出张量
         layers[i] = layer.cpu()
         del layer
         inps, outs = outs, inps
@@ -67,18 +67,19 @@ def llama_eval(model, testenc, dev):
     testenc = testenc.to(dev)
     nlls = []
     for i in range(nsamples):
-        hidden_states = inps[i].unsqueeze(0)
+        hidden_states = inps[i].unsqueeze(0) # decodeLayer输出
         if model.model.norm is not None:
             hidden_states = model.model.norm(hidden_states)
-        lm_logits = model.lm_head(hidden_states)
-        shift_logits = lm_logits[:, :-1, :].contiguous()
+        lm_logits = model.lm_head(hidden_states) # llama输出
+        shift_logits = lm_logits[:, :-1, :].contiguous() # 结果的前n个token, (1, 4095, 32000)
         shift_labels = testenc[
             :, (i * model.seqlen):((i + 1) * model.seqlen)
-        ][:, 1:]
+        ][:, 1:] # label的后n个token, (1, 4095)
         loss_fct = nn.CrossEntropyLoss()
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        neg_log_likelihood = loss.float() * model.seqlen
-        nlls.append(neg_log_likelihood)
-    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
+        neg_log_likelihood = loss.float() #* model.seqlen # 为什么乘seqlen？
+        nlls.append(neg_log_likelihood) # 记录每个样本的nll
+    #ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
+    ppl = torch.exp(torch.stack(nlls).sum() / nsamples)
 
     return ppl.item()

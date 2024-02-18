@@ -10,20 +10,20 @@ def set_seed(seed):
 
 def get_wikitext2(nsamples, seed, seqlen, model, tokenizer):
     from datasets import load_dataset
-    traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
+    traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train') # 36718行1列，每一行为一条文本
     testdata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test')
-    trainenc = tokenizer("\n\n".join(traindata['text']), return_tensors='pt')
+    trainenc = tokenizer("\n\n".join(traindata['text']), return_tensors='pt') # 切成一维tokens (1,2874559)
     testenc = tokenizer("\n\n".join(testdata['text']), return_tensors='pt')
 
     import random
     random.seed(seed)
     trainloader = []
-    for _ in range(nsamples):
+    for _ in range(nsamples): # 随机取128条数据
         i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
         j = i + seqlen
-        inp = trainenc.input_ids[:, i:j]
+        inp = trainenc.input_ids[:, i:j] # 随机抽取一段长度为`seqlen`的tokens
         tar = inp.clone()
-        tar[:, :-1] = -100
+        tar[:, :-1] = -100 # 只保留最后一个token，其他都赋值为-100
         trainloader.append((inp, tar))
     return trainloader, testenc
 
@@ -97,8 +97,8 @@ def get_c4(nsamples, seed, seqlen, model, tokenizer):
 def get_ptb_new(nsamples, seed, seqlen, model, tokenizer):
     from datasets import load_dataset
     traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train')
-    testdata = load_dataset('ptb_text_only', 'penn_treebank', split='test')
-    trainenc = tokenizer(" ".join(traindata['sentence']), return_tensors='pt')
+    testdata = load_dataset('ptb_text_only', 'penn_treebank', split='test') # diff1: validation -> test
+    trainenc = tokenizer(" ".join(traindata['sentence']), return_tensors='pt') #diff2: "\n\n" -> " "
     testenc = tokenizer(" ".join(testdata['sentence']), return_tensors='pt')
 
     import random

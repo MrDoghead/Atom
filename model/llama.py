@@ -9,28 +9,28 @@ from parallel_utils import map_layers_to_multi_gpus
 from LMClass import LMClass
 import lm_eval
 from lm_eval import tasks, evaluator
-from eval import pattern_match
+#from eval import pattern_match
+from pathlib import Path
+import pathlib
+import os
+from transformers import LlamaForCausalLM
+import argparse
+from datautils import *
 
 
 def get_llama(model):
-    import torch
     def skip(*args, **kwargs):
         pass
     torch.nn.init.kaiming_uniform_ = skip
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
-    from transformers import LlamaForCausalLM
-    print(f"Load fp16 model from {model} ...")
+    print(f"Load fp16 model from {model}")
     model = LlamaForCausalLM.from_pretrained(model, torch_dtype=torch.float16)
     #model.seqlen = 2048
     model.seqlen = 4096 # llama2
     return model
 
 if __name__ == '__main__':
-    import argparse
-    from datautils import *
-    import pdb;pdb.set_trace()
-
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
@@ -163,8 +163,17 @@ if __name__ == '__main__':
         '--load_qmodel', type=str, default='',
         help='Path to load the quantized model.'
     )
+    parser.add_argument(
+        '--eval_prompt', action="store_true",
+        help='Whether to evaluate prompt.'
+    )
+    parser.add_argument(
+        '--prompt', type=str, default='LLM is',
+        help='must set --eval'
+    )
     
     args = parser.parse_args()
+    print("args:", args)
 
     model_name = args.model.lower().split('/')[-1]
     if "llama" not in model_name:
@@ -173,11 +182,8 @@ if __name__ == '__main__':
     model = get_llama(args.model)
     model.eval()
 
-    from pathlib import Path
-    import pathlib
-    import os
-
     if args.reorder:
+        reorder_index_file_path = f'{args.save_dir}/{model_name}_reorder_index_{args.dataset}.pt'
         if args.cache_index == False:
             dataloader, testloader = get_loaders(
                 args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
@@ -192,13 +198,13 @@ if __name__ == '__main__':
 
             if not os.path.exists(args.save_dir):
                 os.makedirs(args.save_dir)
-            torch.save(reorder_index, f'{args.save_dir}/{model_name}_reorder_index_{args.dataset}.pt')
+            torch.save(reorder_index, reorder_index_file_path)
+            print(f"reorder_index saved at {reorder_index_file_path}")
         else:
-            index_filename = f'{args.save_dir}/{model_name}_reorder_index_{args.dataset}.pt'
-            assert os.path.isfile(index_filename), "reorder index file not found."
+            assert os.path.isfile(reorder_index_file_path), "reorder index file not found."
 
-            print("Loading cached reording index from disk...")
-            reorder_index = torch.load(index_filename)
+            print(f"Loading cached reording index from {reorder_index_file_path}")
+            reorder_index = torch.load(reorder_index_file_path)
 
         print("Reordering model...")
         model = reorder_model(
@@ -213,10 +219,12 @@ if __name__ == '__main__':
             )
             print("Getting scales...")
             scales = get_act_scales(model, dataloader, DEV, args)
-            torch.save(scales, f'../saved/{model_str}_scales_{args.dataset}_{args.act_group_size}.pt')
+            scales_save_path = f'../saved/{model_name}_scales_{args.dataset}_ags{args.act_group_size}_kp{args.keeper}_kpp{args.keeper_precision}.pt'
+            torch.save(scales, scales_save_path)
+            print("scales saved at: {scales_save_path}")
         else:
             print("Getting cached scales...")
-            scales = torch.load(f'../saved/{model_str}_scales_{args.dataset}_{args.act_group_size}.pt')
+            scales = torch.load(f'../saved/{model_name}_scales_{args.dataset}_ags{args.act_group_size}_kp{args.keeper}_kpp{args.keeper_precision}.pt')
     else:
         scales = defaultdict(lambda: None)
 
@@ -240,10 +248,12 @@ if __name__ == '__main__':
             print(f"full qmodel is saved at {args.save_dir}/")
             torch.save(model, f'{args.save_dir}/{model_name}_w{args.wbits}a{args.abits}_{args.dataset}.pt')
     else:
+        print(f"load qmodel from {args.load_qmodel}")
         model = torch.load(args.load_qmodel)
     
     if args.eval_ppl:
         datasets = ['wikitext2', 'ptb', 'c4', 'ptb-new', 'c4-new']
+        #datasets = {'wikitext2'}
         for dataset in datasets:
             dataloader, testloader = get_loaders(
                 dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
@@ -256,7 +266,7 @@ if __name__ == '__main__':
     if args.eval_common_sense:
 
         lm = LMClass(args, model)
-        lm.seqlen = 2048
+        lm.seqlen = 4096 # llama2 
         lm.model.eval()
         for param in lm.model.parameters():
             param.requires_grad = False
@@ -295,3 +305,87 @@ if __name__ == '__main__':
                 print(f"INFO {task_name} : {results_dict[task_name]['acc_norm']*100:.2f}")
             else:
                 print(f"INFO {task_name} : {results_dict[task_name]['acc']*100:.2f}")
+
+    if args.eval_prompt:
+        args.prompt = "The differences between the term 'hugging face' and 'Hugging Face' are"
+        print("Prompt:", args.prompt)
+        testenc = lm.tokenizer(args.prompt, return_tensors="pt").to(DEV)
+        nsamples = 1
+
+        lm = LMClass(args, model)
+        lm.seqlen = 4096
+        lm.model.eval()
+        for param in lm.model.parameters():
+            param.requires_grad = False
+        lm.model.to(DEV)
+        layers = lm.model.layers
+
+        dtype = next(iter(lm.model.parameters())).dtype
+        inps = torch.zeros(
+            (nsamples, lm.model.seqlen, lm.model.config.hidden_size), dtype=dtype, device=DEV
+        )
+        cache = {'i': 0, 'attention_mask': None}
+
+        class Catcher(nn.Module):
+            def __init__(self, module):
+                super().__init__()
+                self.module = module
+            def forward(self, inp, **kwargs):
+                inps[cache['i']] = inp # 二维，已经过emb
+                cache['i'] += 1
+                cache['attention_mask'] = kwargs['attention_mask']
+                cache['position_ids'] = kwargs['position_ids']
+                raise ValueError
+        layers[0] = Catcher(layers[0])
+        for i in range(nsamples):
+            batch = testenc[:, (i * lm.model.seqlen):((i + 1) * lm.model.seqlen)].to(DEV) # 二维切片
+            try:
+                lm.model(batch)
+            except ValueError:
+                pass
+        layers[0] = layers[0].module
+
+        # layers[0] = layers[0].cpu()
+        # model.model.embed_tokens = model.model.embed_tokens.cpu()
+        # torch.cuda.empty_cache()
+
+        outs = torch.zeros_like(inps)
+        attention_mask = cache['attention_mask']
+        position_ids = cache['position_ids']
+
+        for i in tqdm(range(len(layers))):
+            # layer = layers[i].to(dev) # 一个QLlamaDecoderLayer
+            layer = layers[i]
+            for j in range(nsamples):
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0] # 收集每一个sample下的输出张量
+            # layers[i] = layer.cpu()
+            del layer
+            inps, outs = outs, inps
+
+        # if model.model.norm is not None:
+        #     model.model.norm = model.model.norm.to(dev)
+        # model.lm_head = model.lm_head.to(dev)
+
+        # testenc = testenc.to(dev)
+        for i in range(nsamples):
+            hidden_states = inps[i].unsqueeze(0) # decodeLayer输出
+            if model.model.norm is not None:
+                hidden_states = model.model.norm(hidden_states)
+            lm_logits = model.lm_head(hidden_states) # llama输出
+            shift_logits = lm_logits[:, :-1, :].contiguous() # 结果的前n个token, (1, 4095, 32000)
+            shift_labels = testenc[
+                :, (i * model.seqlen):((i + 1) * model.seqlen)
+            ][:, 1:] # label的后n个token, (1, 4095)
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            neg_log_likelihood = loss.float() #* model.seqlen # 为什么乘seqlen？
+
+
+        #out = lm.model.generate(**inputs, max_length=100, pad_token_id=lm.tokenizer.eos_token_id)
+        out = lm._model_generate(inputs['input_ids'], max_length=100, eos_token_id=lm.tokenizer.eos_token_id)
+
+        lm.model.to('cpu')
+        print("****** Model output ******")
+        print(lm.tokenizer.decode(out[0]))
+        print("**************************")
+

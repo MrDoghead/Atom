@@ -9,29 +9,29 @@ from qLlamaLayer import QLinearLayer
 def get_act_stats(model, dataloader, device_, metric='hessian'):
     nsamples = len(dataloader)
     device = device_
-    act_scales = {}
+    act_scales = {} # 统计activations的显著性数据
 
     def stat_tensor(name, tensor):
         hidden_dim = tensor.shape[-1]
         tensor = tensor.view(-1, hidden_dim).detach()
 
-        if metric == 'hessian':
-            tensorH = math.sqrt(2 / nsamples) * tensor.float().t()
-            comming_H = tensorH.matmul(tensorH.t())
-            comming_scales = torch.diag(comming_H)
+        if metric == 'hessian': # 借鉴RPTQ
+            tensorH = math.sqrt(2 / nsamples) * tensor.float().t() # (4096, 4096)
+            comming_H = tensorH.matmul(tensorH.t()) # 按照H=2XX.t计算Loss对W的海森矩阵，且按样本数平均
+            comming_scales = torch.diag(comming_H) # 取对角线 (4096,)
         else:
             # Here we use abs since symmetric quantization use absmax.
-            comming_scales = torch.mean(tensor.abs(), dim=0).float().cpu()
+            comming_scales = torch.mean(tensor.abs(), dim=0).float().cpu()  # 每个channel的均值
 
         if name in act_scales:
             if metric == 'hessian':
-                act_scales[name] += comming_scales
+                act_scales[name] += comming_scales  # 累加hessian
             else:
-                act_scales[name] = torch.max(act_scales[name], comming_scales)
+                act_scales[name] = torch.max(act_scales[name], comming_scales)  # 保留最大均值
         else:
             act_scales[name] = comming_scales
 
-    def stat_input_hook(m, x, y, name):
+    def stat_input_hook(m, x, y, name): # 统计每一层linear的输入和输出
         if isinstance(x, tuple):
             x = x[0]
             assert isinstance(x, torch.Tensor)
@@ -58,7 +58,7 @@ def get_act_stats(model, dataloader, device_, metric='hessian'):
     dtype = next(iter(model.parameters())).dtype
     inps = torch.zeros(
         (nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=device
-    )
+    ) # 记录每一条数据的输入
     cache = {'i': 0, 'attention_mask': None}
 
     class Catcher(nn.Module):
@@ -68,11 +68,11 @@ def get_act_stats(model, dataloader, device_, metric='hessian'):
         def forward(self, inp, **kwargs):
             inps[cache['i']] = inp.squeeze(0)
             cache['i'] += 1
-            cache['attention_mask'] = kwargs['attention_mask']
+            cache['attention_mask'] = kwargs['attention_mask']  # 每一条不是一样的吗？
             cache['position_ids'] = kwargs['position_ids']
             raise ValueError
-    layers[0] = Catcher(layers[0])
-    for batch in dataloader:
+    layers[0] = Catcher(layers[0]) # 第一层LlamaDecoderLayer
+    for batch in dataloader:    # 遍历校验数据，记录每一条数据在decoderlayer的输入
         try:
             model(batch[0].to(device))
         except ValueError:
@@ -85,13 +85,13 @@ def get_act_stats(model, dataloader, device_, metric='hessian'):
     model.model.norm = model.model.norm.cpu()
     torch.cuda.empty_cache()
 
-    outs = torch.zeros_like(inps)
+    outs = torch.zeros_like(inps) # 记录每一条数据的输出
     attention_mask = cache['attention_mask']
     position_ids = cache['position_ids']
 
-    for i in tqdm(range(len(layers))):
+    for i in tqdm(range(len(layers))):  # 遍历每一层LlamaDecoderLayer
         layer = layers[i].to(device)
-        for j in range(nsamples):
+        for j in range(nsamples):   # 刷128条数据
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         layers[i] = layer.cpu()
         del layer
