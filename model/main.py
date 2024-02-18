@@ -4,19 +4,17 @@ from outlier import *
 from eval import *
 from collections import defaultdict
 from pprint import pprint
-from modelutils import quantize_model, quantize_model_gptq, add_act_quant_wrapper, reorder_model
+from modelutils_llama import quantize_model_llama, reorder_model_llama, quantize_model_gptq_llama,  add_act_quant_wrapper_llama
+from modelutils_opt import quantize_model_opt, reorder_model_opt, quantize_model_gptq_opt,  add_act_quant_wrapper_opt
 from parallel_utils import map_layers_to_multi_gpus
 from LMClass import LMClass
-import lm_eval
-from lm_eval import tasks, evaluator
-#from eval import pattern_match
-from pathlib import Path
-import pathlib
 import os
 from transformers import LlamaForCausalLM
 import argparse
 from datautils import *
-
+from eval import pattern_match
+from lm_eval import tasks as lm_tasks
+from lm_eval import evaluator as lm_evaluator
 
 def get_llama(model):
     def skip(*args, **kwargs):
@@ -29,6 +27,19 @@ def get_llama(model):
     #model.seqlen = 2048
     model.seqlen = 4096 # llama2
     return model
+
+def get_opt(model):
+    import torch
+    def skip(*args, **kwargs):
+        pass
+    torch.nn.init.kaiming_uniform_ = skip
+    torch.nn.init.uniform_ = skip
+    torch.nn.init.normal_ = skip
+    from transformers import OPTForCausalLM
+    model = OPTForCausalLM.from_pretrained(model, torch_dtype=torch.float16)
+    model.seqlen = model.config.max_position_embeddings
+    return model
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -176,10 +187,24 @@ if __name__ == '__main__':
     print("args:", args)
 
     model_name = args.model.lower().split('/')[-1]
-    if "llama" not in model_name:
-        model_name = args.model.split('/')[-2]
+    assert model_name != None, "Please check the model path."
 
-    model = get_llama(args.model)
+    if "llama" in args.model.lower():
+        model = get_llama(args.model)
+        get_act_stats_func = get_act_stats_llama
+        reorder_model_func = reorder_model_llama
+        add_act_quant_wrapper_func = add_act_quant_wrapper_llama
+        quantize_model_gptq_func = quantize_model_gptq_llama
+        quantize_model_func = quantize_model_llama
+        eval_func = llama_eval
+    elif "opt" in args.model.lower():
+        model = get_opt(args.model)
+        get_act_stats_func = get_act_stats_opt
+        reorder_model_func = reorder_model_opt
+        add_act_quant_wrapper_func = add_act_quant_wrapper_opt
+        quantize_model_gptq_func = quantize_model_gptq_opt
+        quantize_model_func = quantize_model_opt
+        eval_func = opt_eval
     model.eval()
 
     if args.reorder:
@@ -189,7 +214,7 @@ if __name__ == '__main__':
                 args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
             )
             print("Getting activation stats...")
-            act_scales = get_act_stats(
+            act_scales = get_act_stats_func(
                 model, dataloader, DEV, metric=args.act_sort_metric
             )
 
@@ -207,7 +232,7 @@ if __name__ == '__main__':
             reorder_index = torch.load(reorder_index_file_path)
 
         print("Reordering model...")
-        model = reorder_model(
+        model = reorder_model_func(
             model, device=DEV, args=args, reorder_index=reorder_index
         )
 
@@ -232,7 +257,8 @@ if __name__ == '__main__':
     if args.load_qmodel == '':
         if args.abits < 16:
             print("Inserting activations quantizers ...")
-            model = add_act_quant_wrapper(model, device=DEV, args=args, scales=scales)
+            scales = defaultdict(lambda: None)
+            model = add_act_quant_wrapper_func(model, device=DEV, args=args, scales=scales)
 
         if args.wbits < 16:
             print("Quantizing...")
@@ -240,9 +266,9 @@ if __name__ == '__main__':
                 dataloader, testloader = get_loaders(
                     args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
                 )
-                model = quantize_model_gptq(model, device=DEV, args=args, dataloader=dataloader)
+                model = quantize_model_gptq_func(model, device=DEV, args=args, dataloader=dataloader)
             else:
-                model = quantize_model(model, device=DEV, args=args)
+                model = quantize_model_func(model, device=DEV, args=args)
         # save model
         if args.save_dir:
             print(f"full qmodel is saved at {args.save_dir}/")
@@ -253,18 +279,18 @@ if __name__ == '__main__':
     
     if args.eval_ppl:
         datasets = ['wikitext2', 'ptb', 'c4', 'ptb-new', 'c4-new']
-        #datasets = {'wikitext2'}
+
         for dataset in datasets:
             dataloader, testloader = get_loaders(
                 dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
             )
             print(f"Evaluating {dataset} ...")
-            ppl = llama_eval(model, testloader, DEV)
+            ppl = eval_func(model, testloader, DEV)
+
             print(f"targetResult,{dataset},{ppl:.3f}")
     
     # eval zero shot accuracy on commonsense datasets
     if args.eval_common_sense:
-
         lm = LMClass(args, model)
         lm.seqlen = 4096 # llama2 
         lm.model.eval()
@@ -272,25 +298,36 @@ if __name__ == '__main__':
             param.requires_grad = False
 
         if args.multigpu:
-            map_layers_to_multi_gpus(lm.model.model.layers)
-            input_device = lm.model.model.layers[0].device
-            output_device = lm.model.model.layers[-1].device
-            assert input_device == output_device
-            lm._device = input_device
-            lm.model.model.embed_tokens.to(input_device)
-            lm.model.model.norm.to(output_device)
-            lm.model.lm_head.to(output_device)
+            if "llama" in args.model.lower():
+                map_layers_to_multi_gpus(lm.model.model.layers)
+                input_device = lm.model.model.layers[0].device
+                output_device = lm.model.model.layers[-1].device
+                assert input_device == output_device
+                lm._device = input_device
+                lm.model.model.embed_tokens.to(input_device)
+                lm.model.model.norm.to(output_device)
+                lm.model.lm_head.to(output_device)
+            elif "opt" in args.model.lower():
+                map_layers_to_multi_gpus(lm.model.model.decoder.layers)
+                input_device = lm.model.model.decoder.layers[0].device
+                output_device = lm.model.model.decoder.layers[-1].device
+                assert input_device == output_device
+                lm._device = input_device
+                lm.model.model.decoder.embed_tokens.to(input_device)
+                lm.model.model.decoder.embed_positions.to(input_device)
+                lm.model.model.decoder.final_layer_norm.to(input_device)
+                lm.model.lm_head.to(output_device)
         else:
             lm._device = DEV
             lm.model = lm.model.to(lm.device)
 
         results = {}
         tasks_str = "piqa,arc_easy,arc_challenge,boolq,hellaswag,winogrande"
-        task_names = pattern_match(tasks_str.split(","), lm_eval.tasks.ALL_TASKS)
+        task_names = pattern_match(tasks_str.split(","), lm_tasks.ALL_TASKS)
         print(f"Selected Tasks: {task_names}")
 
-        task_dict = lm_eval.tasks.get_task_dict(task_names)
-        t_results = lm_eval.evaluator.evaluate(
+        task_dict = lm_tasks.get_task_dict(task_names)
+        t_results = lm_evaluator.evaluate(
             lm,
             task_dict,
             num_fewshot=args.lm_eval_num_fewshot,
@@ -306,6 +343,7 @@ if __name__ == '__main__':
             else:
                 print(f"INFO {task_name} : {results_dict[task_name]['acc']*100:.2f}")
 
+"""
     if args.eval_prompt:
         args.prompt = "The differences between the term 'hugging face' and 'Hugging Face' are"
         print("Prompt:", args.prompt)
@@ -388,4 +426,5 @@ if __name__ == '__main__':
         print("****** Model output ******")
         print(lm.tokenizer.decode(out[0]))
         print("**************************")
+"""
 
