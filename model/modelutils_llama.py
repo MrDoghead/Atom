@@ -15,9 +15,7 @@ def reorder_model_llama(model, device, args, reorder_index):
     layers = model.model.layers
     assert reorder_index is not None, "Reorder index is None"
 
-
     for i in tqdm(range(len(layers))):
-        layers[i] = layers[i].to(device)
         layers[i] = layers[i].to(device)
         if isinstance(layers[i], LlamaDecoderLayer):
             m = QLlamaDecoderLayer(

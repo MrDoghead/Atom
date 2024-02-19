@@ -24,8 +24,8 @@ def get_llama(model):
     torch.nn.init.normal_ = skip
     print(f"Load fp16 model from {model}")
     model = LlamaForCausalLM.from_pretrained(model, torch_dtype=torch.float16)
-    #model.seqlen = 2048
-    model.seqlen = 4096 # llama2
+    model.seqlen = 2048
+    # model.seqlen = 4096 # llama2
     return model
 
 def get_opt(model):

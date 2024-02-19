@@ -116,13 +116,13 @@ def quantize_tensor(w: torch.tensor, n_bits, group_size, tiling, sym, clip_ratio
 
     if group_size > 0:
         assert w.shape[-1] % group_size == 0
-        w = w.reshape(-1, group_size) # row-major order
+        w = w.reshape(-1, group_size) # row-major order 按行分为N组，每128为一组
 
     assert w.dim() == 2, "Weight format: [-1, group]"
     assert n_bits < 16
 
     if sym:
-        w_max = w.abs().amax(dim=-1, keepdim=True).clamp(min=1e-5)
+        w_max = w.abs().amax(dim=-1, keepdim=True).clamp(min=1e-5) # 每组取一个最大绝对值, (N,1)
     else:
         w_max = w.amax(dim=-1, keepdim=True)
         w_min = w.amin(dim=-1, keepdim=True)
@@ -147,11 +147,11 @@ def quantize_tensor(w: torch.tensor, n_bits, group_size, tiling, sym, clip_ratio
         w = w + base
     else: # uniform affine mapping
         if sym:
-            q_max = (2**(n_bits-1)-1)
+            q_max = (2**(n_bits-1)-1) # 4比特就是[-8,7]
             q_min = (-2**(n_bits-1))
             if clip_ratio < 1.0:
                 w_max = w_max * clip_ratio
-            scales = w_max / q_max
+            scales = w_max / q_max # (N,1)
             base = torch.zeros_like(scales)
         else:
             q_max = (2**(n_bits)-1)
@@ -161,7 +161,7 @@ def quantize_tensor(w: torch.tensor, n_bits, group_size, tiling, sym, clip_ratio
                 w_min *= clip_ratio
             scales = (w_max-w_min).clamp(min=1e-5) / q_max
             base = torch.round(-w_min/scales).clamp_(min=q_min, max=q_max)
-        w = (torch.clamp(torch.round(w / scales) + base, q_min, q_max) - base) * scales
+        w = (torch.clamp(torch.round(w / scales) + base, q_min, q_max) - base) * scales # 伪量化
     
     if tiling > 0:
         blocks_to_tensor(w, swapTensor, tiling)
@@ -182,17 +182,17 @@ def quantize_activation_wrapper(x: torch.tensor, args) -> torch.tensor:
         tiling=args.tiling, 
         sym=args.a_sym,
         clip_ratio=args.a_clip_ratio
-    )
+    ) # 定义一个低精度量化函数
 
     savedShape = x.shape
-    x = x.view(-1, savedShape[-1])
+    x = x.view(-1, savedShape[-1]) # 打成2维度
 
     assert args.act_group_size == 0 or (savedShape[-1]) % args.act_group_size == 0, "Group size should be divisible by (dim - keeper)."
 
     if args.keeper > 0:
-        saved_x = x[:, -args.keeper:].clone().contiguous()
+        saved_x = x[:, -args.keeper:].clone().contiguous() # 按列分成低精度和高精度（128）部分
     
-    # Whether to keep outliers in FP8
+    # Whether to keep outliers in FP8 # 对高精度部分采用8比特量化
     if args.keeper and args.keeper_precision > 0:
         assert args.keeper > 0, "Keeper must be greater than 0"
         if args.keeper_precision == 1:
@@ -203,10 +203,10 @@ def quantize_activation_wrapper(x: torch.tensor, args) -> torch.tensor:
             saved_x = quantize_tensor(saved_x, n_bits=8, group_size=0, tiling=0, sym=True, exponential=False)
 
     if args.keeper > 0:
-        x[:, -args.keeper:] = 0
-    x = qFunction(x)
+        x[:, -args.keeper:] = 0 # 清空高精度部分
+    x = qFunction(x) # 量化低精度部分
     if args.keeper > 0:
-        x[:, -args.keeper:] = saved_x
+        x[:, -args.keeper:] = saved_x # 合并量化结果
         del saved_x
 
     return x.view(savedShape)

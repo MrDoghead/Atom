@@ -7,18 +7,18 @@ from qLlamaLayer import QLinearLayer
 
 @torch.no_grad()
 def get_act_stats_llama(model, dataloader, device_, metric='hessian'):
-    nsamples = len(dataloader)
+    nsamples = len(dataloader) # 默认使用128条数据
     device = device_
-    act_scales = {} # 统计activations的显著性数据
+    act_scales = {} # 统计activations的显著性数据(per-channel)
 
     def stat_tensor(name, tensor):
         hidden_dim = tensor.shape[-1]
         tensor = tensor.view(-1, hidden_dim).detach()
 
-        if metric == 'hessian': # 借鉴RPTQ
-            tensorH = math.sqrt(2 / nsamples) * tensor.float().t() # (4096, 4096)
-            comming_H = tensorH.matmul(tensorH.t()) # 按照H=2XX.t计算Loss对W的海森矩阵，且按样本数平均
-            comming_scales = torch.diag(comming_H) # 取对角线 (4096,)
+        if metric == 'hessian': # 参考RPTQ
+            tensorH = math.sqrt(2 / nsamples) * tensor.float().t() # (hidden_size, seqlen)
+            comming_H = tensorH.matmul(tensorH.t()) # 按照H=2XX.t计算Loss对W的海森矩阵，且按样本数平均 (hidden_size,hidden_size)
+            comming_scales = torch.diag(comming_H) # 取对角线 (hidden_size,)
         else:
             # Here we use abs since symmetric quantization use absmax.
             comming_scales = torch.mean(tensor.abs(), dim=0).float().cpu()  # 每个channel的均值
@@ -43,7 +43,7 @@ def get_act_stats_llama(model, dataloader, device_, metric='hessian'):
 
     hooks = []
     for name, m in model.model.named_modules():
-        if isinstance(m, nn.Linear):
+        if isinstance(m, nn.Linear): # 对所有linear层插入hook
             hooks.append(
                 m.register_forward_hook(
                     functools.partial(stat_input_hook, name=name)
@@ -66,11 +66,11 @@ def get_act_stats_llama(model, dataloader, device_, metric='hessian'):
             super().__init__()
             self.module = module
         def forward(self, inp, **kwargs):
-            inps[cache['i']] = inp.squeeze(0)
-            cache['i'] += 1
-            cache['attention_mask'] = kwargs['attention_mask']  # 每一条不是一样的吗？
-            cache['position_ids'] = kwargs['position_ids']
-            raise ValueError
+            inps[cache['i']] = inp.squeeze(0) # (seqlen, hidden_size)
+            cache['i'] += 1 # 记录次数
+            cache['attention_mask'] = kwargs['attention_mask']  # mask为上三角矩阵（seqlen, seqlen），其实只需要记录一次，因为每次都一样
+            cache['position_ids'] = kwargs['position_ids'] # 记录位置id（0,1,2,...,seqlen-1）也只需记录一次
+            raise ValueError # 中断，不需要跑后面的网络
     layers[0] = Catcher(layers[0]) # 第一层LlamaDecoderLayer
     for batch in dataloader:    # 遍历校验数据，记录每一条数据在decoderlayer的输入
         try:
@@ -79,7 +79,7 @@ def get_act_stats_llama(model, dataloader, device_, metric='hessian'):
             pass
     assert cache['i'] == nsamples, "Captured samples should be equal to nsamples"
     
-    layers[0] = layers[0].module
+    layers[0] = layers[0].module # 还原
     layers[0] = layers[0].cpu()
     model.model.embed_tokens = model.model.embed_tokens.cpu()
     model.model.norm = model.model.norm.cpu()
@@ -91,7 +91,7 @@ def get_act_stats_llama(model, dataloader, device_, metric='hessian'):
 
     for i in tqdm(range(len(layers))):  # 遍历每一层LlamaDecoderLayer
         layer = layers[i].to(device)
-        for j in range(nsamples):   # 刷128条数据
+        for j in range(nsamples):   # 刷128条数据给hook
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         layers[i] = layer.cpu()
         del layer
@@ -217,14 +217,14 @@ def get_reorder_index(model, act_scales):
 
     def reorder_tensor_heads(tensor: torch.Tensor) -> torch.tensor:
         assert tensor.dim() == 1, "Choosing outliers must be 1 dimensional after mean."
-        assert tensor.shape[0] % 128 == 0, "Hidden dimension must be divisible by 128." # Assume head_dim == 128
+        assert tensor.shape[0] % 128 == 0, "Hidden dimension must be divisible by 128." # Assume head_dim == 128 有128*32=4096
         
         num_heads = tensor.shape[0] // 128
         index_slices = []
-        for i in range(num_heads):
+        for i in range(num_heads): # 按照head大小进行分块排序
             startIdx = i * 128
             endIdx = (i + 1) * 128
-            _, unitIndices = torch.sort(tensor[startIdx:endIdx], descending=True)
+            _, unitIndices = torch.sort(tensor[startIdx:endIdx], descending=True) # 这里是按照降序
             index_slices.append(unitIndices + startIdx)
             
         return torch.cat(index_slices).contiguous()
@@ -239,7 +239,7 @@ def get_reorder_index(model, act_scales):
             act_orders[inputName] = reorder_tensor(act_scales[inputName])
             assert act_orders[inputName].dim() == 1, "Return Index must be 1 dimensional"
 
-            # Reorder Index of Q,K,V's output (Self-attn's input)
+            # Reorder Index of Q,K,V's output (Self-attn's input) 不理解为什么其他层的输出也要按照head排序
             # Used to determine each head's reorder index
             # Assume head_dim == 128
             outputName = name + ".output"

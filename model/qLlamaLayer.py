@@ -95,7 +95,7 @@ class QLlamaDecoderLayer(nn.Module):
         use_cache: Optional[bool] = False,
         padding_mask=None,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        residual = hidden_states
+        residual = hidden_states # 输入(2048,4096)
 
         hidden_states = self.input_layernorm(hidden_states)
 
@@ -141,11 +141,11 @@ class QLlamaRMSNorm(nn.Module):
     @torch.no_grad()
     def forward(self, hidden_states):
         result = self.originalNorm(hidden_states)
-        if self.reorder_index is not None:
+        if self.reorder_index is not None: # 重排
             assert result.shape[result.dim()-1] == self.reorder_index.shape[0]
             result = torch.index_select(result, result.dim()-1, self.reorder_index)
 
-        if self.args.abits < 16:
+        if self.args.abits < 16: # 动态量化
             result = self.act_quant(result)
 
         return result
@@ -262,7 +262,7 @@ class QLlamaAttention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim) # 没有量化
 
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
             raise ValueError(
@@ -284,7 +284,7 @@ class QLlamaAttention(nn.Module):
         if self.q_kv_cache:
             value_states = self.v_quant(value_states)
 
-        attn_output = torch.matmul(attn_weights, value_states)
+        attn_output = torch.matmul(attn_weights, value_states) # 没有量化
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
