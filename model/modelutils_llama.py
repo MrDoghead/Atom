@@ -123,6 +123,37 @@ def add_act_quant_wrapper_llama(model, device, args, scales):
         torch.cuda.empty_cache()
     return model
 
+def requantize_model_llama(model, device, args):
+    print('Starting requantization ...')
+    model.config.use_cache = False
+    layers = model.model.layers
+    for i in tqdm(range(len(layers))):
+        m = None
+        if isinstance(layers[i], LlamaDecoderLayer):
+            m = QLlamaDecoderLayer(
+                originalLayer=layers[i],
+                args=args,
+            )
+        elif isinstance(layers[i], QLlamaDecoderLayer):
+            m = layers[i]
+
+        if m is None:
+            continue
+
+        m = m.to(device)
+        m.self_attn.q_proj.requant(groupsize=args.weight_group_size)
+        m.self_attn.k_proj.requant(groupsize=args.weight_group_size)
+        m.self_attn.v_proj.requant(groupsize=args.weight_group_size)
+        # m.self_attn.o_proj.requant(groupsize=args.weight_group_size)
+        # m.mlp.gate_proj.requant(groupsize=args.weight_group_size)
+        # m.mlp.up_proj.requant(groupsize=args.weight_group_size)
+        # m.mlp.down_proj.requant(groupsize=args.weight_group_size)
+
+        layers[i] = m.cpu()
+        torch.cuda.empty_cache()
+        
+    return model
+
 def quantize_model_llama(model, device, args):
     model.config.use_cache = False
     layers = model.model.layers
@@ -152,7 +183,7 @@ def quantize_model_llama(model, device, args):
         torch.cuda.empty_cache()
     return model
 
-def quantize_model_gptq_llama(model, device, args, dataloader):
+def quantize_model_gptq_llama(model, device, args, dataloader, real_quant=False):
     print('Starting GPTQ quantization ...')
 
     use_cache = model.config.use_cache
@@ -241,13 +272,13 @@ def quantize_model_gptq_llama(model, device, args, dataloader):
             for name in subset:
                 handles.append(subset[name].register_forward_hook(add_batch(name)))
             for j in range(args.nsamples):
-                layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0] # feed gptq
             for h in handles:
                 h.remove()
             
             for name in subset:
                 gptq[name].fasterquant(
-                    percdamp=args.percdamp, groupsize=args.weight_group_size
+                    percdamp=args.percdamp, groupsize=args.weight_group_size, real_quant=real_quant
                 )
                 quantizers['model.layers.%d.%s' % (i, name)] = gptq[name].quantizer.cpu()
                 gptq[name].free()

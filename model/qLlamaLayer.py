@@ -3,7 +3,7 @@ from torch import nn
 from typing import List, Optional, Tuple
 import math
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm, LlamaAttention, LlamaMLP
-from quant import Quantizer, fake_quantize_quarter_E5M2, fake_quantize_quarter_E4M3, quantize_tensor, quantize_tensor_channel_group
+from quant import Quantizer, fake_quantize_quarter_E5M2, fake_quantize_quarter_E4M3, quantize_gptq, quantize_tensor, quantize_tensor_channel_group
 from qLinearLayer import QLinearLayer
 
 def rotate_half(x):
@@ -94,10 +94,15 @@ class QLlamaDecoderLayer(nn.Module):
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         padding_mask=None,
+        real_quant=False,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states # 输入(2048,4096)
 
-        hidden_states = self.input_layernorm(hidden_states)
+        if real_quant:
+            hidden_states, scales_hi, base_hi, scales_lo, base_lo = self.input_layernorm(hidden_states, real_quant=real_quant)
+        else:
+            hidden_states = self.input_layernorm(hidden_states)
+            scales_hi, base_hi, scales_lo, base_lo = None, None, None, None
 
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
@@ -107,6 +112,11 @@ class QLlamaDecoderLayer(nn.Module):
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
+            real_quant=real_quant,
+            inp_scales_hi=scales_hi, 
+            inp_base_hi=base_hi, 
+            inp_scales_lo=scales_lo, 
+            inp_base_lo=base_lo,
         )
         hidden_states = residual + hidden_states
 
@@ -139,14 +149,14 @@ class QLlamaRMSNorm(nn.Module):
         self.args = args
 
     @torch.no_grad()
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, real_quant=False):
         result = self.originalNorm(hidden_states)
         if self.reorder_index is not None: # 重排
             assert result.shape[result.dim()-1] == self.reorder_index.shape[0]
             result = torch.index_select(result, result.dim()-1, self.reorder_index)
 
-        if self.args.abits < 16: # 动态量化
-            result = self.act_quant(result)
+        if self.args.abits < 16:
+            return self.act_quant(result, real_quant=real_quant) # 动态量化，注意可能有多个返回
 
         return result
     
@@ -232,12 +242,23 @@ class QLlamaAttention(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        real_quant=False,
+        inp_scales_hi=None, 
+        inp_base_hi=None, 
+        inp_scales_lo=None, 
+        inp_base_lo=None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        query_states = self.q_proj(
+                                hidden_states, real_quant, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo
+                        ).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = self.k_proj(
+                                hidden_states, real_quant, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo
+                        ).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = self.v_proj(
+                                hidden_states, real_quant, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo
+                        ).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:

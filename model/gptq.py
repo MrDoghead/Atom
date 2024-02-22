@@ -11,22 +11,11 @@ import torch.nn as nn
 import transformers
 
 from qLlamaLayer import QLinearLayer
-from quant import quantize_tensor, fake_quantize_quarter_E5M2, fake_quantize_quarter_E4M3
+from quant import quantize_gptq, quantize_tensor, quantize_tensor_real, fake_quantize_quarter_E5M2, fake_quantize_quarter_E4M3
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
-def quantize_gptq(x, scale, zero, maxq, channel_group):
-    if maxq < 0:
-        return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
-    shape = x.shape
-    if channel_group > 1:
-        assert len(shape) == 2, "only support 2D input when using multilple channel group"
-        shape = x.shape
-        x = x.reshape((int(x.shape[0]/channel_group), -1))
-    q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
-    q = scale * (q - zero)
-    return q.reshape(shape)
 
 class Quantizer_GPTQ(nn.Module):
     def __init__(self, shape=1):
@@ -65,7 +54,7 @@ class Quantizer_GPTQ(nn.Module):
             if weight:
                 x = x.flatten(1)
                 if self.channel_group > 1:
-                    x = x.reshape(int(shape[0]/self.channel_group), -1)
+                    x = x.reshape(int(shape[0]/self.channel_group), -1) # cg=2, (2048, 3968*2)
             else:
                 if len(shape) == 4:
                     x = x.permute([1, 0, 2, 3])
@@ -78,7 +67,7 @@ class Quantizer_GPTQ(nn.Module):
             x = x.flatten().unsqueeze(0)
 
         tmp = torch.zeros(x.shape[0], device=dev)
-        xmin = torch.minimum(x.min(1)[0], tmp)
+        xmin = torch.minimum(x.min(1)[0], tmp) # 2048
         xmax = torch.maximum(x.max(1)[0], tmp)
 
         if self.sym:
@@ -200,7 +189,7 @@ class GPTQ:
         self.H += inp.matmul(inp.t())
     
     def fasterquant(
-        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False
+        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, real_quant=False
     ):
         assert actorder==False, "we don't deal with actorder inside GPTQ for our implementation."
         W = self.layer.weight.data.clone()
@@ -234,6 +223,10 @@ class GPTQ:
         H = torch.linalg.cholesky(H, upper=True)
         Hinv = H
         
+        self.layer.maxq = self.quantizer.maxq
+        self.layer.channel_group = self.quantizer.channel_group
+        self.layer.scales = torch.zeros((int(W.shape[0]/self.quantizer.channel_group), self.n_nonout))
+        self.layer.zeros = torch.zeros((int(W.shape[0]/self.quantizer.channel_group), self.n_nonout))
         for i1 in range(0, self.n_nonout, blocksize):
             i2 = min(i1 + blocksize, self.n_nonout)
             count = i2 - i1
@@ -251,6 +244,8 @@ class GPTQ:
                 if groupsize > 0:
                     if (i1 + i) % groupsize == 0:
                         self.quantizer.find_params(W[:, (i1 + i):min((i1 + i + groupsize), self.n_nonout)], weight=True)
+                self.layer.scales[:, i1+i] = self.quantizer.scale.flatten()
+                self.layer.zeros[:, i1+i] = self.quantizer.zero.flatten()
                 q = quantize_gptq(
                     w.unsqueeze(1), self.quantizer.scale, self.quantizer.zero, self.quantizer.maxq, self.quantizer.channel_group
                 ).flatten()
@@ -279,6 +274,10 @@ class GPTQ:
                 elif self.keeper_precision == 2:
                     keep_w = fake_quantize_quarter_E4M3(keep_w)
                 elif self.keeper_precision == 3:
+                    if real_quant:
+                        _, scales_hi, base_hi = quantize_tensor_real(keep_w, n_bits=8, group_size=0, tiling=0, sym=True, exponential=False)
+                        self.layer.keep_scales = scales_hi
+                        self.layer.keep_zeros = base_hi
                     keep_w = quantize_tensor(keep_w, n_bits=8, group_size=0, tiling=0, sym=True, exponential=False)
 
             Q[:,self.n_nonout:] = keep_w

@@ -4,7 +4,7 @@ from outlier import *
 from eval import *
 from collections import defaultdict
 from pprint import pprint
-from modelutils_llama import quantize_model_llama, reorder_model_llama, quantize_model_gptq_llama,  add_act_quant_wrapper_llama
+from modelutils_llama import quantize_model_llama, reorder_model_llama, quantize_model_gptq_llama,  add_act_quant_wrapper_llama, requantize_model_llama
 from modelutils_opt import quantize_model_opt, reorder_model_opt, quantize_model_gptq_opt,  add_act_quant_wrapper_opt
 from parallel_utils import map_layers_to_multi_gpus
 from LMClass import LMClass
@@ -175,13 +175,18 @@ if __name__ == '__main__':
         help='Path to load the quantized model.'
     )
     parser.add_argument(
-        '--eval_prompt', action="store_true",
-        help='Whether to evaluate prompt.'
+        "--real_quant", action="store_true",
+        help='Whether to apply real quantize.'
     )
-    parser.add_argument(
-        '--prompt', type=str, default='LLM is',
-        help='must set --eval'
-    )
+    # parser.add_argument(
+    #     '--eval_prompt', action="store_true",
+    #     help='Whether to evaluate prompt.'
+    # )
+    # parser.add_argument(
+    #     '--prompt', type=str, default='LLM is',
+    #     help='must set --eval'
+    # )
+
     
     args = parser.parse_args()
     print("args:", args)
@@ -266,7 +271,7 @@ if __name__ == '__main__':
                 dataloader, testloader = get_loaders(
                     args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
                 )
-                model = quantize_model_gptq_func(model, device=DEV, args=args, dataloader=dataloader)
+                model = quantize_model_gptq_func(model, device=DEV, args=args, dataloader=dataloader, real_quant=args.real_quant)
             else:
                 model = quantize_model_func(model, device=DEV, args=args)
         # save model
@@ -276,6 +281,10 @@ if __name__ == '__main__':
     else:
         print(f"load qmodel from {args.load_qmodel}")
         model = torch.load(args.load_qmodel)
+
+    if args.real_quant:
+        assert "llama" in args.model.lower(), "only support llama"
+        model = requantize_model_llama(model, device=DEV, args=args)
     
     if args.eval_ppl:
         datasets = ['wikitext2', 'ptb', 'c4', 'ptb-new', 'c4-new']
@@ -285,7 +294,7 @@ if __name__ == '__main__':
                 dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
             )
             print(f"Evaluating {dataset} ...")
-            ppl = eval_func(model, testloader, DEV)
+            ppl = eval_func(model, testloader, DEV, real_quant=args.real_quant)
 
             print(f"targetResult,{dataset},{ppl:.3f}")
     
@@ -416,7 +425,7 @@ if __name__ == '__main__':
             ][:, 1:] # label的后n个token, (1, 4095)
             loss_fct = nn.CrossEntropyLoss()
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-            neg_log_likelihood = loss.float() #* model.seqlen # 为什么乘seqlen？
+            neg_log_likelihood = loss.float()
 
 
         #out = lm.model.generate(**inputs, max_length=100, pad_token_id=lm.tokenizer.eos_token_id)

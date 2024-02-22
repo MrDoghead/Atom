@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from quant import fake_quantize_quarter_E5M2, fake_quantize_quarter_E4M3, quantize_tensor, quantize_tensor_channel_group
+from quant import fake_quantize_quarter_E5M2, fake_quantize_quarter_E4M3, quantize_gptq, quantize_tensor, quantize_tensor_channel_group
 
 def find_qlinear_layers(module, name=''):
     if type(module) == QLinearLayer:
@@ -25,16 +25,127 @@ class QLinearLayer(nn.Module):
             self.register_buffer('bias', originalLayer.bias)
         else:
             self.bias = None
+        self.scales = None # torch.zeros((int(W.shape[0]/self.quantizer.channel_group), self.n_nonout))
+        self.zeros = None
+        self.keep_scales = None # (channel, 1)
+        self.keep_zeros = None
+        self.maxq = 0
+        self.channel_group = 0
+
+    @torch.no_grad
+    def bmm_4bit(self, x, w):
+        return torch.matmul(x, w)
+
+    @torch.no_grad
+    def bmm_8bit(self, x, w):
+        return torch.matmul(x, w)
+
+    @torch.no_grad
+    def _forward(self, x, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo, blocksize=128):
+        # mix-precision matmul
+        # assume x and w are both symmetrically quantized
+        assert self.args.act_group_size == self.args.weight_group_size
+        assert x.dim() == 2 or x.shape[0] == 1, "only support bs=1"
+        bs, seqlen, hidden_dim = x.shape
+        x = x.squeeze()
+        W = self.weight.T
+        n_nonout = hidden_dim - self.args.keeper
+        inp_scales_lo = inp_scales_lo.reshape(seqlen, -1)
+        inp_base_lo = inp_base_lo.reshape(seqlen, -1)
+
+        y = torch.zeros((x.shape[0], W.shape[1]), dtype=torch.float16).to(x.device)
+        for i1 in range(0, n_nonout, blocksize):
+            i2 = min(i1 + blocksize, n_nonout)
+            x_block = x[:, i1:i2]
+            w_block = W[i1:i2, :]
+            x_block_scales = inp_scales_lo[:, i1//blocksize].reshape(-1,1)
+            # x_block_scales = torch.ones((2048,1), dtype=torch.float16).to(x.device)
+            w_block_scales = self.scales[:, i1].reshape(-1,1)
+            if self.channel_group > 0:
+                w_block_scales = w_block_scales.repeat(1, self.channel_group).reshape(-1,1)
+            w_block_scales = w_block_scales.to(x_block_scales.device).to(x_block_scales.dtype)
+            block_scales = torch.matmul(x_block_scales, w_block_scales.T) # fp16
+            y_lo = self.bmm_4bit(x_block, w_block)
+            y += y_lo * block_scales
+        
+        if self.args.keeper > 0:
+            assert self.args.keeper_precision == 3, "only support int8 keeper"
+            x_hi = x[:, n_nonout:]
+            w_hi = W[n_nonout:, :]
+            w_hi_scales = self.keep_scales.to(inp_scales_hi.device).to(inp_scales_hi.dtype)
+            hi_scales = torch.matmul(inp_scales_hi, w_hi_scales.T) # fp16
+            y_hi = self.bmm_8bit(x_hi, w_hi)
+            y += y_hi * hi_scales
+
+        return y.reshape(bs, seqlen, hidden_dim)
         
     @torch.no_grad()
-    def forward(self, x):
-        y = torch.functional.F.linear(x, self.weight, self.bias)
+    def forward(self, x, 
+                real_quant=False, 
+                inp_scales_hi=None, 
+                inp_base_hi=None, 
+                inp_scales_lo=None, 
+                inp_base_lo=None,
+            ):
+        if real_quant:
+            # forward+dequant
+            y = self._forward(x, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo)
+            if self.bias:
+                y = y + self.bias
+        else:
+            y = torch.functional.F.linear(x, self.weight, self.bias) # y = x@w.T + b
         return y
     
     def to(self, *args, **kwargs):
         super(QLinearLayer, self).to(*args, **kwargs)
         self.weight = self.weight.to(*args, **kwargs)
         return self
+    
+    @torch.no_grad()
+    def requant(self, blocksize=128, groupsize=-1):
+        if self.args.wbits >= 16:
+            return
+        
+        W = self.weight.data.clone()
+        Q = torch.zeros_like(W)
+        n_nonout = W.shape[1] - self.args.keeper
+        for i1 in range(0, n_nonout, blocksize):
+            i2 = min(i1 + blocksize, n_nonout)
+            count = i2 - i1
+
+            W1 = W[:, i1:i2].clone()
+            Q1 = torch.zeros_like(W1)
+            for i in range(count):
+                w = W1[:, i]
+
+                if groupsize > 0:
+                    if (i1 + i) % groupsize == 0:
+                        scale = self.scales[:, i1+i].reshape(-1,1)
+                        zero = self.zeros[:, i1+i].reshape(-1,1)
+                q = quantize_gptq(
+                    w.unsqueeze(1), scale.to(w.device), zero.to(w.device), self.maxq, self.channel_group, real_quant=True, offset=False
+                ).flatten()
+                Q1[:, i] = q
+            Q[:, i1:i2] = Q1
+
+        if self.args.keeper > 0:
+            keep_w = self.weight[:, -self.args.keeper:].clone().contiguous()
+        
+        # Whether to keep outliers in FP8
+        # for outliers, groupsize=0
+        if self.args.keeper_precision > 0:
+            assert self.args.keeper > 0, "Keeper must be greater than 0"
+            assert self.args.keeper_precision ==3, "only support int8 keeper now"
+            if self.args.keeper_precision == 1:
+                return
+            elif self.args.keeper_precision == 2:
+                return 
+            elif self.args.keeper_precision == 3:
+                keep_w = torch.clamp(torch.round(keep_w / self.keep_scales) + self.keep_zeros, -128, 127)
+
+        Q[:, -self.args.keeper:] = keep_w
+        self.weight = Q.reshape(self.weight.shape).to(self.weight.data.dtype)
+        del keep_w
     
     @torch.no_grad()
     def quant(self):
