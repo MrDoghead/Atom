@@ -144,7 +144,7 @@ def requantize_model_llama(model, device, args):
         m.self_attn.q_proj.requant(groupsize=args.weight_group_size)
         m.self_attn.k_proj.requant(groupsize=args.weight_group_size)
         m.self_attn.v_proj.requant(groupsize=args.weight_group_size)
-        # m.self_attn.o_proj.requant(groupsize=args.weight_group_size)
+        m.self_attn.o_proj.requant(groupsize=args.weight_group_size)
         # m.mlp.gate_proj.requant(groupsize=args.weight_group_size)
         # m.mlp.up_proj.requant(groupsize=args.weight_group_size)
         # m.mlp.down_proj.requant(groupsize=args.weight_group_size)

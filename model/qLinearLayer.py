@@ -58,8 +58,7 @@ class QLinearLayer(nn.Module):
             i2 = min(i1 + blocksize, n_nonout)
             x_block = x[:, i1:i2]
             w_block = W[i1:i2, :]
-            x_block_scales = inp_scales_lo[:, i1//blocksize].reshape(-1,1)
-            # x_block_scales = torch.ones((2048,1), dtype=torch.float16).to(x.device)
+            x_block_scales = inp_scales_lo[:, i1//blocksize].reshape(-1,1).to(torch.float32)
             w_block_scales = self.scales[:, i1].reshape(-1,1)
             if self.channel_group > 0:
                 w_block_scales = w_block_scales.repeat(1, self.channel_group).reshape(-1,1)
@@ -72,9 +71,10 @@ class QLinearLayer(nn.Module):
             assert self.args.keeper_precision == 3, "only support int8 keeper"
             x_hi = x[:, n_nonout:]
             w_hi = W[n_nonout:, :]
+            inp_scales_hi = inp_scales_hi.to(torch.float32)
             w_hi_scales = self.keep_scales.to(inp_scales_hi.device).to(inp_scales_hi.dtype)
             hi_scales = torch.matmul(inp_scales_hi, w_hi_scales.T) # fp16
-            y_hi = self.bmm_8bit(x_hi, w_hi)
+            y_hi = self.bmm_8bit(x_hi.to(torch.float32), w_hi.to(torch.float32)) # fp32
             y += y_hi * hi_scales
 
         return y.reshape(bs, seqlen, hidden_dim)

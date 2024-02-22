@@ -53,7 +53,7 @@ def llama_eval(model, testenc, dev, real_quant=False):
     position_ids = cache['position_ids']
 
     for i in tqdm(range(len(layers))):
-        layer = layers[i].to(dev) # 一个QLlamaDecoderLayer
+        layer = layers[i].to(dev)
         for j in range(nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids, real_quant=real_quant)[0] # 收集每一个sample下的输出张量
         layers[i] = layer.cpu()

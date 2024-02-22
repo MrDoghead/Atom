@@ -244,7 +244,7 @@ class GPTQ:
                 if groupsize > 0:
                     if (i1 + i) % groupsize == 0:
                         self.quantizer.find_params(W[:, (i1 + i):min((i1 + i + groupsize), self.n_nonout)], weight=True)
-                self.layer.scales[:, i1+i] = self.quantizer.scale.flatten()
+                self.layer.scales[:, i1+i] = self.quantizer.scale.flatten() # TODO: 去重
                 self.layer.zeros[:, i1+i] = self.quantizer.zero.flatten()
                 q = quantize_gptq(
                     w.unsqueeze(1), self.quantizer.scale, self.quantizer.zero, self.quantizer.maxq, self.quantizer.channel_group

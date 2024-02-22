@@ -33,10 +33,10 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
     Returns:
         `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
     """
-    cos = cos[position_ids].unsqueeze(unsqueeze_dim)
-    sin = sin[position_ids].unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
+    cos = cos[position_ids].unsqueeze(unsqueeze_dim) # (1,1,2048,128)
+    sin = sin[position_ids].unsqueeze(unsqueeze_dim) # (1,1,2048,128)
+    q_embed = (q * cos) + (rotate_half(q) * sin) # (1,32,2048,128)
+    k_embed = (k * cos) + (rotate_half(k) * sin) # (1,32,2048,128)
     return q_embed, k_embed
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -151,7 +151,7 @@ class QLlamaRMSNorm(nn.Module):
     @torch.no_grad()
     def forward(self, hidden_states, real_quant=False):
         result = self.originalNorm(hidden_states)
-        if self.reorder_index is not None: # 重排
+        if self.reorder_index is not None:
             assert result.shape[result.dim()-1] == self.reorder_index.shape[0]
             result = torch.index_select(result, result.dim()-1, self.reorder_index)
 
@@ -269,9 +269,14 @@ class QLlamaAttention(nn.Module):
         if self.q_kv_cache:
             key_states = self.k_quant(key_states)
         
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-        # [bsz, nh, t, hd]
+        # ```RoPE
+        # freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+        # t = torch.arange(end, device=freqs.device)  # type: ignore
+        # freqs = torch.outer(t, freqs).float()  # type: ignore
+        # freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+        # ```
+        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len) # (2048, 128) 
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids) # [bsz, nh, t, hd]
 
         if past_key_value is not None:
             # reuse k, v, self_attention
@@ -283,7 +288,7 @@ class QLlamaAttention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim) # 没有量化
+        attn_weights = torch.matmul(query_states.to(torch.float32), key_states.transpose(2, 3).to(torch.float32)) / math.sqrt(self.head_dim) # 没有量化 fp32
 
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
             raise ValueError(
@@ -321,9 +326,21 @@ class QLlamaAttention(nn.Module):
             attn_output = torch.index_select(attn_output, 2, self.reorder_index)
 
         # Quantize the attention output
-        attn_output = self.act_quant(attn_output)
-        attn_output = self.o_proj(attn_output)
+        if real_quant:
+            attn_output, scales_hi, base_hi, scales_lo, base_lo  = self.act_quant(attn_output, real_quant=real_quant)
+        else:
+            attn_output = self.act_quant(attn_output)
+            scales_hi, base_hi, scales_lo, base_lo = None, None, None, None
 
+        attn_output = self.o_proj(
+                        attn_output, 
+                        real_quant=real_quant,
+                        inp_scales_hi=scales_hi, 
+                        inp_base_hi=base_hi, 
+                        inp_scales_lo=scales_lo, 
+                        inp_base_lo=base_lo,
+                    )
+        
         if not output_attentions:
             attn_weights = None
 
