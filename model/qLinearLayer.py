@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from quant import fake_quantize_quarter_E5M2, fake_quantize_quarter_E4M3, quantize_gptq, quantize_tensor, quantize_tensor_channel_group
+from gemm_1 import GEMM_OPU_Parallel
 
 def find_qlinear_layers(module, name=''):
     if type(module) == QLinearLayer:
@@ -34,7 +35,8 @@ class QLinearLayer(nn.Module):
 
     @torch.no_grad
     def bmm_4bit(self, x, w):
-        return torch.matmul(x, w)
+        # return torch.matmul(x, w)
+        return GEMM_OPU_Parallel(x, w)
 
     @torch.no_grad
     def bmm_8bit(self, x, w):
@@ -77,7 +79,7 @@ class QLinearLayer(nn.Module):
             y_hi = self.bmm_8bit(x_hi.to(torch.float32), w_hi.to(torch.float32)) # fp32
             y += y_hi * hi_scales
 
-        return y.reshape(bs, seqlen, hidden_dim)
+        return y.reshape(bs, seqlen, W.shape[1])
         
     @torch.no_grad()
     def forward(self, x, 

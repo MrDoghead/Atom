@@ -122,8 +122,20 @@ class QLlamaDecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        if real_quant:
+            hidden_states, scales_hi, base_hi, scales_lo, base_lo = self.post_attention_layernorm(hidden_states, real_quant=real_quant)
+        else:
+            hidden_states = self.post_attention_layernorm(hidden_states)
+            scales_hi, base_hi, scales_lo, base_lo = None, None, None, None
+
+        hidden_states = self.mlp(
+                            hidden_states,
+                            real_quant=real_quant,
+                            inp_scales_hi=scales_hi, 
+                            inp_base_hi=base_hi, 
+                            inp_scales_lo=scales_lo, 
+                            inp_base_lo=base_lo,
+                        )
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -379,9 +391,29 @@ class QLlamaMLP(nn.Module):
         return self
 
     @torch.no_grad()
-    def forward(self, x):
+    def forward(
+            self, 
+            x,
+            real_quant=False,
+            inp_scales_hi=None, 
+            inp_base_hi=None, 
+            inp_scales_lo=None, 
+            inp_base_lo=None,
+        ):
         # input X: [b, seq, dim]: quantized
-        tmpResult = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+        if real_quant:
+            gate_state = self.gate_proj(x, real_quant, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo)
+            up_state = self.up_proj(x, real_quant, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo)
+            tmpResult = self.act_fn(gate_state) * up_state
+        else:
+            tmpResult = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+        
         # Quantize the activations and feed into down_proj
-        tmpResult = self.act_quant(tmpResult)
-        return self.down_proj(tmpResult)
+        if real_quant:
+            tmpResult, scales_hi, base_hi, scales_lo, base_lo = self.act_quant(tmpResult, real_quant=real_quant)
+        else:
+            tmpResult = self.act_quant(tmpResult)
+            scales_hi, base_hi, scales_lo, base_lo = None, None, None, None
+        mlp_output = self.down_proj(tmpResult, real_quant, scales_hi, base_hi, scales_lo, base_lo)
+
+        return mlp_output
