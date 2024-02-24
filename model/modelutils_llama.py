@@ -139,7 +139,8 @@ def requantize_model_llama(model, device, args):
 
         if m is None:
             continue
-
+        
+        m.real_quant = True
         m = m.to(device)
         m.self_attn.q_proj.requant(groupsize=args.weight_group_size)
         m.self_attn.k_proj.requant(groupsize=args.weight_group_size)
@@ -242,6 +243,7 @@ def quantize_model_gptq_llama(model, device, args, dataloader, real_quant=False)
         if m is None:
             continue
 
+        m.real_quant = False
         layer = m.to(device)
 
         block_layers = find_qlinear_layers(layer)

@@ -11,7 +11,7 @@ def pattern_match(patterns, source_list):
     return list(task_names)
 
 @torch.no_grad()
-def llama_eval(model, testenc, dev, real_quant=False):
+def llama_eval(model, testenc, dev):
     testenc = testenc.input_ids
     nsamples = testenc.numel() // model.seqlen
     layers = model.model.layers
@@ -55,7 +55,7 @@ def llama_eval(model, testenc, dev, real_quant=False):
     for i in tqdm(range(len(layers))):
         layer = layers[i].to(dev)
         for j in range(nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids, real_quant=real_quant)[0] # 收集每一个sample下的输出张量
+            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0] # 收集每一个sample下的输出张量
         layers[i] = layer.cpu()
         del layer
         inps, outs = outs, inps

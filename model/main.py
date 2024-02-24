@@ -9,7 +9,6 @@ from modelutils_opt import quantize_model_opt, reorder_model_opt, quantize_model
 from parallel_utils import map_layers_to_multi_gpus
 from LMClass import LMClass
 import os
-from transformers import LlamaForCausalLM
 import argparse
 from datautils import *
 from eval import pattern_match
@@ -17,6 +16,7 @@ from lm_eval import tasks as lm_tasks
 from lm_eval import evaluator as lm_evaluator
 
 def get_llama(model):
+    from transformers import LlamaForCausalLM
     def skip(*args, **kwargs):
         pass
     torch.nn.init.kaiming_uniform_ = skip
@@ -29,13 +29,12 @@ def get_llama(model):
     return model
 
 def get_opt(model):
-    import torch
+    from transformers import OPTForCausalLM
     def skip(*args, **kwargs):
         pass
     torch.nn.init.kaiming_uniform_ = skip
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
-    from transformers import OPTForCausalLM
     model = OPTForCausalLM.from_pretrained(model, torch_dtype=torch.float16)
     model.seqlen = model.config.max_position_embeddings
     return model
@@ -287,21 +286,22 @@ if __name__ == '__main__':
         model = requantize_model_llama(model, device=DEV, args=args)
     
     if args.eval_ppl:
-        datasets = ['wikitext2', 'ptb', 'c4', 'ptb-new', 'c4-new']
+        # datasets = ['wikitext2', 'ptb', 'c4', 'ptb-new', 'c4-new']
+        datasets = ['wikitext2', 'ptb', 'c4']
 
         for dataset in datasets:
             dataloader, testloader = get_loaders(
                 dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
             )
             print(f"Evaluating {dataset} ...")
-            ppl = eval_func(model, testloader, DEV, real_quant=args.real_quant)
+            ppl = eval_func(model, testloader, DEV)
 
             print(f"targetResult,{dataset},{ppl:.3f}")
     
     # eval zero shot accuracy on commonsense datasets
     if args.eval_common_sense:
         lm = LMClass(args, model)
-        lm.seqlen = 4096 # llama2 
+        lm.seqlen = 2048 # 4096 # llama2
         lm.model.eval()
         for param in lm.model.parameters():
             param.requires_grad = False
@@ -340,7 +340,7 @@ if __name__ == '__main__':
             lm,
             task_dict,
             num_fewshot=args.lm_eval_num_fewshot,
-            limit=None if args.lm_eval_limit == -1 else args.lm_eval_limit
+            limit=None if args.lm_eval_limit == -1 else args.lm_eval_limit,
         )
         results.update(t_results)
         pprint(results)

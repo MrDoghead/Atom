@@ -75,6 +75,7 @@ class QLlamaDecoderLayer(nn.Module):
             originalLayer.post_attention_layernorm, 
             args
         )
+        args.real_quant = False
 
     def to(self, *args, **kwargs):
         super(QLlamaDecoderLayer, self).to(*args, **kwargs)
@@ -94,12 +95,11 @@ class QLlamaDecoderLayer(nn.Module):
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         padding_mask=None,
-        real_quant=False,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states # 输入(2048,4096)
 
-        if real_quant:
-            hidden_states, scales_hi, base_hi, scales_lo, base_lo = self.input_layernorm(hidden_states, real_quant=real_quant)
+        if self.real_quant:
+            hidden_states, scales_hi, base_hi, scales_lo, base_lo = self.input_layernorm(hidden_states, real_quant=self.real_quant)
         else:
             hidden_states = self.input_layernorm(hidden_states)
             scales_hi, base_hi, scales_lo, base_lo = None, None, None, None
@@ -112,7 +112,7 @@ class QLlamaDecoderLayer(nn.Module):
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
-            real_quant=real_quant,
+            real_quant=self.real_quant,
             inp_scales_hi=scales_hi, 
             inp_base_hi=base_hi, 
             inp_scales_lo=scales_lo, 
@@ -122,15 +122,15 @@ class QLlamaDecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
-        if real_quant:
-            hidden_states, scales_hi, base_hi, scales_lo, base_lo = self.post_attention_layernorm(hidden_states, real_quant=real_quant)
+        if self.real_quant:
+            hidden_states, scales_hi, base_hi, scales_lo, base_lo = self.post_attention_layernorm(hidden_states, real_quant=self.real_quant)
         else:
             hidden_states = self.post_attention_layernorm(hidden_states)
             scales_hi, base_hi, scales_lo, base_lo = None, None, None, None
 
         hidden_states = self.mlp(
                             hidden_states,
-                            real_quant=real_quant,
+                            real_quant=self.real_quant,
                             inp_scales_hi=scales_hi, 
                             inp_base_hi=base_hi, 
                             inp_scales_lo=scales_lo, 
@@ -278,7 +278,7 @@ class QLlamaAttention(nn.Module):
         
         # Fake quantize the key_states.
         # Preserve the position embedding info by first quantize.
-        if self.q_kv_cache:
+        if self.q_kv_cache and self.abits < 16:
             key_states = self.k_quant(key_states)
         
         # ```RoPE
@@ -319,7 +319,7 @@ class QLlamaAttention(nn.Module):
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
 
         # Fake quantize the value_states
-        if self.q_kv_cache:
+        if self.q_kv_cache and self.abits < 16:
             value_states = self.v_quant(value_states)
 
         attn_output = torch.matmul(attn_weights, value_states) # 没有量化
@@ -340,8 +340,10 @@ class QLlamaAttention(nn.Module):
         # Quantize the attention output
         if real_quant:
             attn_output, scales_hi, base_hi, scales_lo, base_lo  = self.act_quant(attn_output, real_quant=real_quant)
-        else:
+        elif self.abits < 16:
             attn_output = self.act_quant(attn_output)
+            scales_hi, base_hi, scales_lo, base_lo = None, None, None, None
+        else:
             scales_hi, base_hi, scales_lo, base_lo = None, None, None, None
 
         attn_output = self.o_proj(
@@ -381,6 +383,7 @@ class QLlamaMLP(nn.Module):
         self.act_fn = originalMLP.act_fn
         self.act_quant = Quantizer(args=args)
         # self.register_buffer("act_shifts", None)
+        self.abits = args.abits
 
     def to(self, *args, **kwargs):
         super(QLlamaMLP, self).to(*args, **kwargs)
@@ -411,8 +414,10 @@ class QLlamaMLP(nn.Module):
         # Quantize the activations and feed into down_proj
         if real_quant:
             tmpResult, scales_hi, base_hi, scales_lo, base_lo = self.act_quant(tmpResult, real_quant=real_quant)
-        else:
+        elif self.abits < 16:
             tmpResult = self.act_quant(tmpResult)
+            scales_hi, base_hi, scales_lo, base_lo = None, None, None, None
+        else:
             scales_hi, base_hi, scales_lo, base_lo = None, None, None, None
         mlp_output = self.down_proj(tmpResult, real_quant, scales_hi, base_hi, scales_lo, base_lo)
 
