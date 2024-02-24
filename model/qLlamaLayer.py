@@ -75,7 +75,7 @@ class QLlamaDecoderLayer(nn.Module):
             originalLayer.post_attention_layernorm, 
             args
         )
-        args.real_quant = False
+        self.real_quant = args.real_quant
 
     def to(self, *args, **kwargs):
         super(QLlamaDecoderLayer, self).to(*args, **kwargs)
