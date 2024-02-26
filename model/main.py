@@ -274,7 +274,7 @@ if __name__ == '__main__':
             else:
                 model = quantize_model_func(model, device=DEV, args=args)
         # save model
-        if args.save_dir:
+        if (args.abits < 16 or args.wbits < 16) and args.save_dir:
             print(f"full qmodel is saved at {args.save_dir}/")
             torch.save(model, f'{args.save_dir}/{model_name}_w{args.wbits}a{args.abits}_{args.dataset}.pt')
     else:
@@ -332,6 +332,7 @@ if __name__ == '__main__':
 
         results = {}
         tasks_str = "piqa,arc_easy,arc_challenge,boolq,hellaswag,winogrande"
+        # tasks_str = "piqa"
         task_names = pattern_match(tasks_str.split(","), lm_tasks.ALL_TASKS)
         print(f"Selected Tasks: {task_names}")
 
