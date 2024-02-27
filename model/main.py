@@ -15,6 +15,8 @@ from eval import pattern_match
 from lm_eval import tasks as lm_tasks
 from lm_eval import evaluator as lm_evaluator
 
+#os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+
 def get_llama(model):
     from transformers import LlamaForCausalLM
     def skip(*args, **kwargs):
@@ -162,7 +164,7 @@ if __name__ == '__main__':
         help="Number of shots in lm evaluation. Default is 0 for zero-shot."
     )
     parser.add_argument(
-        "--lm_eval_limit", type=int, default=-1, 
+        "--lm_eval_limit", type=float, default=-1, 
         help="Limit the number of examples in lm evaluation"
     )
     parser.add_argument(
@@ -211,7 +213,7 @@ if __name__ == '__main__':
         eval_func = opt_eval
     model.eval()
 
-    if args.reorder:
+    if args.reorder and args.load_qmodel=='':
         reorder_index_file_path = f'{args.save_dir}/{model_name}_reorder_index_{args.dataset}.pt'
         if args.cache_index == False:
             dataloader, testloader = get_loaders(
@@ -287,11 +289,12 @@ if __name__ == '__main__':
     
     if args.eval_ppl:
         # datasets = ['wikitext2', 'ptb', 'c4', 'ptb-new', 'c4-new']
-        datasets = ['wikitext2', 'ptb', 'c4']
+        #datasets = ['wikitext2', 'ptb', 'c4']
+        datasets = ['wikitext2']
 
         for dataset in datasets:
             dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen, test_only=True
             )
             print(f"Evaluating {dataset} ...")
             ppl = eval_func(model, testloader, DEV)

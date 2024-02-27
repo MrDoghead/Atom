@@ -8,17 +8,20 @@ def set_seed(seed):
     torch.random.manual_seed(seed)
 
 
-def get_wikitext2(nsamples, seed, seqlen, model, tokenizer):
+def get_wikitext2(nsamples, seed, seqlen, model, tokenizer, test_only=False):
     from datasets import load_dataset
-    traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train') # 36718行1列，每一行为一条文本
+    if not test_only:
+        traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train') # 36718行1列，每一行为一条文本
+        trainenc = tokenizer("\n\n".join(traindata['text']), return_tensors='pt') # 切成一维tokens (1,2874559)
     testdata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test')
-    trainenc = tokenizer("\n\n".join(traindata['text']), return_tensors='pt') # 切成一维tokens (1,2874559)
     testenc = tokenizer("\n\n".join(testdata['text']), return_tensors='pt')
 
     import random
     random.seed(seed)
     trainloader = []
     for _ in range(nsamples): # 随机取128条数据
+        if test_only:
+            break
         i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j] # 随机抽取一段长度为`seqlen`的tokens
@@ -27,17 +30,20 @@ def get_wikitext2(nsamples, seed, seqlen, model, tokenizer):
         trainloader.append((inp, tar))
     return trainloader, testenc
 
-def get_ptb(nsamples, seed, seqlen, model, tokenizer):
+def get_ptb(nsamples, seed, seqlen, model, tokenizer, test_only=False):
     from datasets import load_dataset
-    traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train')
+    if not test_only:
+        traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train')
+        trainenc = tokenizer("\n\n".join(traindata['sentence']), return_tensors='pt')
     valdata = load_dataset('ptb_text_only', 'penn_treebank', split='validation')
-    trainenc = tokenizer("\n\n".join(traindata['sentence']), return_tensors='pt')
     testenc = tokenizer("\n\n".join(valdata['sentence']), return_tensors='pt')
 
     import random
     random.seed(seed)
     trainloader = []
     for _ in range(nsamples):
+        if test_only:
+            break
         i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j]
@@ -46,7 +52,7 @@ def get_ptb(nsamples, seed, seqlen, model, tokenizer):
         trainloader.append((inp, tar))
     return trainloader, testenc
 
-def get_c4(nsamples, seed, seqlen, model, tokenizer):
+def get_c4(nsamples, seed, seqlen, model, tokenizer, test_only=False):
     from datasets import load_dataset, VerificationMode
     """
     traindata = load_dataset(
@@ -56,12 +62,15 @@ def get_c4(nsamples, seed, seqlen, model, tokenizer):
         'allenai/c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation'
     )
     """
-    traindata = load_dataset("json", data_files="/data/datasets/c4/en/c4-train.00000-of-01024.json.gz", split='train', verification_mode=VerificationMode.NO_CHECKS)
+    if not test_only:
+        traindata = load_dataset("json", data_files="/data/datasets/c4/en/c4-train.00000-of-01024.json.gz", split='train', verification_mode=VerificationMode.NO_CHECKS)
     valdata = load_dataset("json", data_files="/data/datasets/c4/en/c4-validation.00000-of-00008.json.gz", split='train', verification_mode=VerificationMode.NO_CHECKS)
     import random
     random.seed(seed)
     trainloader = []
     for _ in range(nsamples):
+        if test_only:
+            break
         while True:
             i = random.randint(0, len(traindata) - 1)
             trainenc = tokenizer(traindata[i]['text'], return_tensors='pt')
@@ -154,7 +163,7 @@ def get_c4_new(nsamples, seed, seqlen, model, tokenizer):
 
 
 def get_loaders(
-    name, nsamples=128, seed=0, seqlen=2048, model=''
+    name, nsamples=128, seed=0, seqlen=2048, model='', test_only=False
 ):
     # assert "llama" in model.lower(), "Only llama models are supported."
 
@@ -176,12 +185,12 @@ def get_loaders(
         tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False, legacy=False)
     
     if 'wikitext2' in name:
-        return get_wikitext2(nsamples, seed, seqlen, model, tokenizer)
+        return get_wikitext2(nsamples, seed, seqlen, model, tokenizer, test_only)
     if 'ptb' in name:
         if 'new' in name:
             return get_ptb_new(nsamples, seed, seqlen, model, tokenizer)
-        return get_ptb(nsamples, seed, seqlen, model, tokenizer)
+        return get_ptb(nsamples, seed, seqlen, model, tokenizer, test_only)
     if 'c4' in name:
         if 'new' in name:
             return get_c4_new(nsamples, seed, seqlen, model, tokenizer)
-        return get_c4(nsamples, seed, seqlen, model, tokenizer)
+        return get_c4(nsamples, seed, seqlen, model, tokenizer, test_only)
