@@ -14,6 +14,10 @@ from datautils import *
 from eval import pattern_match
 from lm_eval import tasks as lm_tasks
 from lm_eval import evaluator as lm_evaluator
+import global_var
+
+import warnings
+warnings.filterwarnings('ignore')
 
 #os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 
@@ -179,14 +183,6 @@ if __name__ == '__main__':
         "--real_quant", action="store_true",
         help='Whether to apply real quantize.'
     )
-    # parser.add_argument(
-    #     '--eval_prompt', action="store_true",
-    #     help='Whether to evaluate prompt.'
-    # )
-    # parser.add_argument(
-    #     '--prompt', type=str, default='LLM is',
-    #     help='must set --eval'
-    # )
 
     
     args = parser.parse_args()
@@ -286,6 +282,8 @@ if __name__ == '__main__':
     if args.real_quant:
         assert "llama" in args.model.lower(), "only support llama"
         model = requantize_model_llama(model, device=DEV, args=args)
+        # torch.save(model, f'{args.save_dir}/{model_name}_w{args.wbits}a{args.abits}_{args.dataset}_fake4bit.pt')
+        # exit()
     
     if args.eval_ppl:
         # datasets = ['wikitext2', 'ptb', 'c4', 'ptb-new', 'c4-new']
@@ -356,88 +354,4 @@ if __name__ == '__main__':
             else:
                 print(f"INFO {task_name} : {results_dict[task_name]['acc']*100:.2f}")
 
-"""
-    if args.eval_prompt:
-        args.prompt = "The differences between the term 'hugging face' and 'Hugging Face' are"
-        print("Prompt:", args.prompt)
-        testenc = lm.tokenizer(args.prompt, return_tensors="pt").to(DEV)
-        nsamples = 1
-
-        lm = LMClass(args, model)
-        lm.seqlen = 4096
-        lm.model.eval()
-        for param in lm.model.parameters():
-            param.requires_grad = False
-        lm.model.to(DEV)
-        layers = lm.model.layers
-
-        dtype = next(iter(lm.model.parameters())).dtype
-        inps = torch.zeros(
-            (nsamples, lm.model.seqlen, lm.model.config.hidden_size), dtype=dtype, device=DEV
-        )
-        cache = {'i': 0, 'attention_mask': None}
-
-        class Catcher(nn.Module):
-            def __init__(self, module):
-                super().__init__()
-                self.module = module
-            def forward(self, inp, **kwargs):
-                inps[cache['i']] = inp # 二维，已经过emb
-                cache['i'] += 1
-                cache['attention_mask'] = kwargs['attention_mask']
-                cache['position_ids'] = kwargs['position_ids']
-                raise ValueError
-        layers[0] = Catcher(layers[0])
-        for i in range(nsamples):
-            batch = testenc[:, (i * lm.model.seqlen):((i + 1) * lm.model.seqlen)].to(DEV) # 二维切片
-            try:
-                lm.model(batch)
-            except ValueError:
-                pass
-        layers[0] = layers[0].module
-
-        # layers[0] = layers[0].cpu()
-        # model.model.embed_tokens = model.model.embed_tokens.cpu()
-        # torch.cuda.empty_cache()
-
-        outs = torch.zeros_like(inps)
-        attention_mask = cache['attention_mask']
-        position_ids = cache['position_ids']
-
-        for i in tqdm(range(len(layers))):
-            # layer = layers[i].to(dev) # 一个QLlamaDecoderLayer
-            layer = layers[i]
-            for j in range(nsamples):
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0] # 收集每一个sample下的输出张量
-            # layers[i] = layer.cpu()
-            del layer
-            inps, outs = outs, inps
-
-        # if model.model.norm is not None:
-        #     model.model.norm = model.model.norm.to(dev)
-        # model.lm_head = model.lm_head.to(dev)
-
-        # testenc = testenc.to(dev)
-        for i in range(nsamples):
-            hidden_states = inps[i].unsqueeze(0) # decodeLayer输出
-            if model.model.norm is not None:
-                hidden_states = model.model.norm(hidden_states)
-            lm_logits = model.lm_head(hidden_states) # llama输出
-            shift_logits = lm_logits[:, :-1, :].contiguous() # 结果的前n个token, (1, 4095, 32000)
-            shift_labels = testenc[
-                :, (i * model.seqlen):((i + 1) * model.seqlen)
-            ][:, 1:] # label的后n个token, (1, 4095)
-            loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-            neg_log_likelihood = loss.float()
-
-
-        #out = lm.model.generate(**inputs, max_length=100, pad_token_id=lm.tokenizer.eos_token_id)
-        out = lm._model_generate(inputs['input_ids'], max_length=100, eos_token_id=lm.tokenizer.eos_token_id)
-
-        lm.model.to('cpu')
-        print("****** Model output ******")
-        print(lm.tokenizer.decode(out[0]))
-        print("**************************")
-"""
 
