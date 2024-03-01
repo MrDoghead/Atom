@@ -2,6 +2,31 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 import fnmatch
+import time
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn import functional as F
+
+from odk_story4.ApprxPICPyTorch import ApprxPICPyTorch
+
+class MyDataset(Dataset):
+    def __init__(self, samples, seq_len, n_gpu) -> None:
+        super().__init__()
+        self.seq_len = seq_len
+        self.samples = samples
+        self.n_samples = samples.numel() // seq_len
+        self.n_padded_samples = 0
+        if self.n_samples % n_gpu != 0:
+            self.n_padded_samples = n_gpu - self.n_samples % n_gpu
+            self.samples = F.pad(self.samples, (0, self.n_padded_samples*seq_len), mode='constant', value=0)
+
+    def __len__(self):
+        return self.n_samples
+    
+    def __getitem__(self, index):
+        data = self.samples[0, (index * self.seq_len):((index + 1) * self.seq_len)]
+        label = self.samples[0, (index * self.seq_len):((index + 1) * self.seq_len)][1:]
+        return data, label
 
 def pattern_match(patterns, source_list):
     task_names = set()
@@ -11,9 +36,48 @@ def pattern_match(patterns, source_list):
     return list(task_names)
 
 @torch.no_grad()
-def llama_eval(model, testenc, dev):
+def llama_eval_parallel(model, testenc, dev):
+    model = model.cuda()
+    model.eval()
+    seqlen = model.seqlen
+
     testenc = testenc.input_ids
-    nsamples = testenc.numel() // model.seqlen
+    test_dataset = MyDataset(testenc, seqlen, torch.distributed.get_world_size())
+    test_loader = DataLoader(dataset=test_dataset,
+                             batch_size=1,
+                             sampler=DistributedSampler(test_dataset))
+    
+    model = torch.nn.parallel.DistributedDataParallel(model, broadcast_buffers=False, find_unused_parameters=True)
+
+    # model = torch.nn.parallel.DistributedDataParallel(model, 
+    #                                                   device_ids=[0,1], 
+    #                                                   output_device=0, 
+    #                                                   broadcast_buffers=False,
+    #                                                   find_unused_parameters=True)
+    nlls = []
+    with torch.no_grad():
+        for inp, label in tqdm(test_loader, desc="Eval"):
+            batch = inp.cuda()
+            lm_logits = model(batch).logits
+            shift_logits = lm_logits[:, :-1, :].contiguous() # 结果的前n个token, (1, 4095, 32000)
+            shift_labels = label.cuda() # label的后n个token, (1, 4095)
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            neg_log_likelihood = loss.float()
+
+            gather_nll = [torch.zeros_like(neg_log_likelihood) for _ in range(torch.distributed.get_world_size())]
+            torch.distributed.all_gather(gather_nll, neg_log_likelihood)
+            nlls.extend(gather_nll)
+    
+    ppl = torch.exp(torch.stack(nlls).sum() / test_dataset.n_samples)
+
+    return ppl.item()
+
+@torch.no_grad()
+def llama_eval(model, testenc, dev):
+    model.eval()
+    testenc = testenc.input_ids
+    nsamples = 4 #testenc.numel() // model.seqlen
     layers = model.model.layers
 
     model.model.embed_tokens = model.model.embed_tokens.to(dev)
@@ -55,7 +119,7 @@ def llama_eval(model, testenc, dev):
     for i in tqdm(range(len(layers))):
         layer = layers[i].to(dev)
         for j in range(nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0] # 收集每一个sample下的输出张量
+            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         layers[i] = layer.cpu()
         del layer
         inps, outs = outs, inps
