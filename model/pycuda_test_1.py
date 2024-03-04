@@ -8,12 +8,6 @@ from pycuda.compiler import SourceModule
 # import pycuda.gpuarray as gpuarray
 import pycuda.driver as drv
 
-vmap = np.load('/data/omacshit/vmap.npy').astype(np.float32)
-wmap = np.load('/data/omacshit/wmap.npy')
-wmap = np.mean(wmap,axis=1).astype(np.float32)
-# print(vmap.shape, wmap.shape)
-omac_size =16
-
 # for i in range(100):
 #     a = torch.randn((1024,1024)).cuda()
 #     torch.matmul(a, a.T)
@@ -121,6 +115,12 @@ void __global__  mapping(const int* input, const int *input_dims, float* input_o
 mapping2 = mod2.get_function("mapping")
 
 def test():
+
+    vmap = np.load('/data/omacshit/vmap.npy').astype(np.float32)
+    wmap = np.load('/data/omacshit/wmap.npy')
+    wmap = np.mean(wmap,axis=1).astype(np.float32)
+    # print(vmap.shape, wmap.shape)
+    omac_size =16
 
     input = torch.randint(low=0, high=16, size=(8, 2048, omac_size),dtype=torch.int32, device='cuda')  #[256,116,16]
     weight = torch.randint(low=-8, high=8, size=(8, omac_size, 4096),dtype=torch.int32, device='cuda') #[256,16,4096]
