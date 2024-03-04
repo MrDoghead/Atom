@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 from quant import fake_quantize_quarter_E5M2, fake_quantize_quarter_E4M3, quantize_gptq, quantize_tensor, quantize_tensor_channel_group
-# from gemm_1 import GEMM_OPU_Parallel
 import global_var
 
 def find_qlinear_layers(module, name=''):
@@ -35,12 +34,14 @@ class QLinearLayer(nn.Module):
         self.channel_group = 0
 
     @torch.no_grad
-    def bmm_4bit(self, x, w):
-        # return torch.matmul(x, w)
-        # return GEMM_OPU_Parallel(x, w)
-        
-        outputs, _ = global_var._simulator_instance(x=x.unsqueeze(0).to(torch.int32), y=w.unsqueeze(0).to(torch.int32), inputType="int4", seed=None)
-        return outputs.squeeze()
+    def bmm_4bit(self, x, w, simu="ideal"):
+        if simu == "ideal":
+            return global_var._simulator_instance(x, w)
+        elif simu == "physical":
+            outputs, _ = global_var._simulator_instance(x=x.unsqueeze(0).to(torch.int32), y=w.unsqueeze(0).to(torch.int32), inputType="int4", seed=None)
+            return outputs.squeeze()
+        else:
+            return torch.matmul(x, w)
 
 
     @torch.no_grad

@@ -318,16 +318,16 @@ if __name__ == '__main__':
         print(f"load qmodel from {args.load_qmodel}")
         model = torch.load(args.load_qmodel)
 
-    if args.real_quant:
-        assert "llama" in args.model.lower(), "only support llama"
-        model = requantize_model_llama(model, device=torch.distributed.get_rank(), args=args)
+    # if args.real_quant:
+    #     assert "llama" in args.model.lower(), "only support llama"
+    #     model = requantize_model_llama(model, device=torch.distributed.get_rank(), args=args)
         # torch.save(model, f'{args.save_dir}/{model_name}_w{args.wbits}a{args.abits}_{args.dataset}_fake4bit.pt')
         # exit()
     
     if args.eval_ppl:
         # datasets = ['wikitext2', 'ptb', 'c4', 'ptb-new', 'c4-new']
         #datasets = ['wikitext2', 'ptb', 'c4']
-        datasets = ['wikitext2']
+        datasets = ['c4']
 
         for dataset in datasets:
             dataloader, testloader = get_loaders(

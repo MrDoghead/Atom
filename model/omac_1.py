@@ -1,54 +1,115 @@
 import torch
 import numpy as np
+import torch.nn.functional as F
+from pycuda_test_1 import Holder, mapping
 
-class OPU(torch.autograd.Function):
-    """ 
-    Optical Processing Unit (OPU) Design 
-
+class OPU(torch.nn.Module):
     """
-    pic_row= 16 # 必须是2的整数次方
-    pic_column= 16 # 必须是2的整数次方
-    input_bits= 4
-    weight_bits= 4
-    out_bits= 8 # max output bits：log2(pic_row*144)*2 = log2(2304)*2 = 13bit
-    tia_noise_sigma = 2  # std of pace noise 1 4 6
-    tia_noise_mean = 0  # mean of pace noise
-    tia_scaling_factor = 16 # 2 4 8 16
-    max_out_bits = int(input_bits + weight_bits + np.log2(pic_row) )
-    print(f"[OPU INFO]\n pic_row: {pic_row}\n pic_column:{pic_column}\n" \
-            f" input_bits:{input_bits}\n weight_bits:{weight_bits}\n out_bits:{out_bits}\n" \
-            f" tia_noise_sigma:{tia_noise_sigma}\n tia_noise_mean:{tia_noise_mean}\n tia_scaling_factor:{tia_scaling_factor}")
+    Optical Processing Unit (OPU) Design
+ 
+    """
+    def __init__(self, dev):
+        super().__init__()
+        self.device = dev
+        self.pic_row = 16 # 必须是2的整数次方
+        self.pic_column = 16 # 必须是2的整数次方
+        self.input_bits = 4
+        self.weight_bits = 4
+        self.adc_output_bits = 8 #
+        self.tia_noise_sigma = 0 #1.15  # fixed value, indepenet from tia gain @Yuemiao Di
+        self.tia_noise_mean = 0  #
+        self.tia_gain = 1 # [1 2 4 8 16],  defalut value is 1, choose the best one
+        self.base_scale_factor = 2**int(self.input_bits + self.weight_bits + np.log2(self.pic_row) - self.adc_output_bits)
+        self.vmap = torch.from_numpy(np.load("/data/omacshit/vmap.npy")).to(torch.float32).to(self.device)
+        self.wmap = torch.from_numpy(np.load("/data/omacshit/wmap.npy")).mean(dim=1).to(torch.float32).to(self.device)
+        print(f"[OPU INFO]\n pic_row: {self.pic_row}\n pic_column:{self.pic_column}\n" \
+            f" input_bits:{self.input_bits}\n weight_bits:{self.weight_bits}\n adc_output_bits:{self.adc_output_bits}\n" \
+            f" tia_noise_sigma:{self.tia_noise_sigma}\n tia_noise_mean:{self.tia_noise_mean}\n tia_gain:{self.tia_gain}\n" \
+            f" base_scale_factor:{self.base_scale_factor}")
+     
+    @torch.no_grad
+    def optical_matmul(self, input, weight):
+        def omm(v, w):
+            mm_out = torch.matmul(v, w)
 
-    @staticmethod
-    def forward(ctx, input,  weight):
+            scale_factor = self.base_scale_factor / self.tia_gain
 
-        # max_out_bits = OPU.input_bits + OPU.weight_bits + np.log2(OPU.pic_row) 
+            mm_out = mm_out / scale_factor
 
-        with torch.no_grad():
-            mm_out = torch.matmul(input, weight) # signal 2 4 8 16
+            # add TIA noise to 8bit output
+            tia_noise = torch.normal(mean=self.tia_noise_mean, std=self.tia_noise_sigma, size=mm_out.size(),  device=input.device)
+                
+            adc_out = torch.clamp(torch.round(mm_out + tia_noise),
+                                  -2**(self.adc_output_bits-1), 2**(self.adc_output_bits-1)-1)
 
-            # add TIA noise to output
-            noise = torch.randn(size=mm_out.size(), requires_grad=False, device=input.device) * OPU.tia_noise_sigma + OPU.tia_noise_mean
-            # omac_mm_out = mm_out + noise * 16
-            # noise = torch.normal(mean=OPU.tia_noise_mean*(2**(OPU.max_out_bits - OPU.out_bits)), 
-            #              std=OPU.tia_noise_sigma*(2**(OPU.max_out_bits - OPU.out_bits)), 
-            #              size =mm_out.size(),  device=input.device)
-            # omac_mm_out = mm_out + noise
-            omac_mm_out = mm_out
+            scaled_out = adc_out * scale_factor # scale adc output back to intended range in digital domain
 
-            # scale
-            omac_mm_out = omac_mm_out * OPU.tia_scaling_factor
-            mask = torch.where(omac_mm_out>=0, 1, -1) 
-            out_mat_abs = torch.abs(omac_mm_out)
-            omac_mm_out = out_mat_abs.to(torch.int32) >> (OPU.max_out_bits - OPU.out_bits)
-            omac_mm_out = omac_mm_out * mask
-            omac_mm_out = omac_mm_out.clip(-128, 127)
+            return scaled_out
+
+        input_ = input + 8
+        input_offset = torch.zeros(input_.shape, dtype=torch.float32, device=input_.device)
+        input_dims = torch.tensor(input_.shape, dtype=torch.int32, device=input_.device)
+
+        weight_ = weight + 8 # for indexing
+        weight_offset = torch.zeros(weight_.shape, dtype=torch.float32, device=weight_.device)
+        weight_dims = torch.tensor(weight_.shape, dtype=torch.int32, device=weight_.device)
+
+        grid_size = max(input_.shape[0], weight_.shape[0])
+        block_size = self.pic_row * self.pic_column
+        mapping(
+            Holder(input_.to(torch.int32)), Holder(input_dims), Holder(input_offset), Holder(self.vmap),
+            Holder(weight_.to(torch.int32)), Holder(weight_dims), Holder(weight_offset), Holder(self.wmap),
+            grid=(grid_size, 1, 1), block=(block_size, 1, 1))
+
+        input_out = input + input_offset
+        weight_out = weight + weight_offset
+        omm_out = omm(input_out, weight_out)
+
+        return omm_out
+    
+    def forward(self, input, weight):
+        input_dims = len(input.shape)
+        assert(input.shape[-1] == weight.shape[0])
+        batch_size = input.shape[0]
+        repeats = input.shape[-1] // self.pic_row
+        remainder = input.shape[-1] % self.pic_row
+        repeats = repeats+1 if remainder!=0 else repeats
+        
+        pad_dim = self.pic_row*repeats-input.shape[-1]
+
+        if(input_dims==3):
+            inp_ = F.pad(input,(0, pad_dim, 0, 0),"constant",value=0)#左右上下,填右边
+            inp_ = inp_.contiguous().view([batch_size*input.shape[1], repeats, -1])
+            # input_scale_ = F.pad(input_scale,(0, pad_dim, 0, 0),"constant",value=0)
+            # input_scale_ = input_scale_.contiguous().view([batch_size*input.shape[1], repeats, -1])
+        elif (input_dims==2):
+            inp_ = F.pad(input,(0, pad_dim, 0, 0),"constant",value=0)#左右上下,填右边
+            inp_ = inp_.contiguous().view(batch_size, repeats, -1)
+            # input_scale_ = F.pad(input_scale,(0, pad_dim, 0, 0),"constant",value=0)
+            # input_scale_ = input_scale_.contiguous().view(batch_size, repeats, -1)
+        else:
+            raise NotImplementedError
+        
+        weight_ = F.pad(weight, (0, 0, 0, pad_dim), "constant", value=0)#左右上下， 填下边
+        weight_ = weight_.permute(1,0).reshape(weight_.shape[1], repeats, -1).permute(2,1,0)
+        # weight_scale_ = F.pad(weight_scale, (0, 0, 0, pad_dim), "constant", value=0)#左右上下， 填下边
+        # weight_scale_ = weight_scale_.permute(1,0).reshape(weight_scale_.shape[1], repeats, -1).permute(2,1,0)
+
+        weight_t = weight_.permute(1,0,2) 
+        # weight_scale_t = weight_scale_.permute(1,0,2)
+
+        input_t = inp_.permute(1,0,2)
+        # input_scale_t = input_scale_.permute(1,0,2)
+        
+        # temp_out_true = torch.matmul(input_t, weight_t)
+        temp_out = self.optical_matmul(input_t, weight_t)
+        temp_out = temp_out.permute(1,0,2)
+        temp_out = torch.sum(temp_out, dim=1, keepdim=False)
+
+
+        if len(input.shape)==2:
+            return temp_out
+        elif len(input.shape)==3:
+            out_ = temp_out.view([batch_size,input.shape[1],weight.shape[1]]) 
+            return out_
             
-            omac_mm_out = omac_mm_out + noise
-
-            # recover
-            omac_mm_out = omac_mm_out.to(torch.int32) << (OPU.max_out_bits - OPU.out_bits)
-            omac_mm_out = omac_mm_out // OPU.tia_scaling_factor
-
-
-            return omac_mm_out.to(torch.float32)

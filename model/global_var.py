@@ -1,5 +1,17 @@
 import torch
 from odk_story4.ApprxPICPyTorch import ApprxPICPyTorch
+from omac_1 import OPU
+
+def init_ideal_simulator():
+    global _simulator_instance 
+    _simulator_instance = OPU(dev="cuda")
+    print("Initialize a simulator at device:", _simulator_instance.device)
+    _simulator_instance = torch.compile(_simulator_instance)
+
+def init_multi_ideal_simulator():
+    global _simulator_instance 
+    _simulator_instance = OPU(dev=f"cuda:{torch.distributed.get_rank()}")
+    print("Initialize a simulator at device:", _simulator_instance.device)
 
 def init_simulator():
     global _simulator_instance
@@ -11,7 +23,7 @@ def init_simulator():
                                     input_precision=4,
                                     weight_precision=4,
                                     output_precision=8,
-                                    instFolder="/data/pace2/16X16_0",
+                                    instFolder="/data/pace2/16X16_enob6.44",
                                     )
     print("Initialize a simulator at device:", _simulator_instance.device_type)
     _simulator_instance = torch.compile(_simulator_instance)
@@ -26,7 +38,7 @@ def init_multi_simulator():
                                     input_precision=4,
                                     weight_precision=4,
                                     output_precision=8,
-                                    instFolder="/data/pace2/16X16_0",
+                                    instFolder="/data/pace2/16X16_enob6.44",
                                     )
     print("Initialize a simulator at device:", _simulator_instance.device_type)
     _simulator_instance = torch.compile(_simulator_instance)
