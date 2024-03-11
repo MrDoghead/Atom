@@ -187,7 +187,8 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     print("args:", args)
-    global_var.init_ideal_simulator()
+    # global_var.init_ideal_simulator()
+    global_var.init_simulator()
 
     model_name = args.model.lower().split('/')[-1]
     assert model_name != None, "Please check the model path."
@@ -273,18 +274,18 @@ if __name__ == '__main__':
             else:
                 model = quantize_model_func(model, device=DEV, args=args)
         # save model
-        if (args.abits < 16 or args.wbits < 16) and args.save_dir:
-            print(f"full qmodel is saved at {args.save_dir}/")
-            torch.save(model, f'{args.save_dir}/{model_name}_w{args.wbits}a{args.abits}_{args.dataset}.pt')
+        # if (args.abits < 16 or args.wbits < 16) and args.save_dir:
+        #     print(f"full qmodel is saved at {args.save_dir}/")
+        #     torch.save(model, f'{args.save_dir}/{model_name}_w{args.wbits}a{args.abits}_{args.dataset}.pt')
     else:
         print(f"load qmodel from {args.load_qmodel}")
         model = torch.load(args.load_qmodel)
 
-    # if args.real_quant:
-    #     assert "llama" in args.model.lower(), "only support llama"
-    #     model = requantize_model_llama(model, device=DEV, args=args)
-        # torch.save(model, f'{args.save_dir}/{model_name}_w{args.wbits}a{args.abits}_{args.dataset}_fake4bit.pt')
-        # exit()
+    if args.real_quant:
+        assert "llama" in args.model.lower(), "only support llama"
+        model = requantize_model_llama(model, device=DEV, args=args)
+        torch.save(model, f'{args.save_dir}/{model_name}_w{args.wbits}a{args.abits}_{args.dataset}_fake4bit.pt')
+        exit()
     
     if args.eval_ppl:
         # datasets = ['wikitext2', 'ptb', 'c4', 'ptb-new', 'c4-new']

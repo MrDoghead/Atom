@@ -35,10 +35,12 @@ class QLinearLayer(nn.Module):
 
     @torch.no_grad
     def bmm_4bit(self, x, w, simu="ideal"):
+        simu = "physical"
         if simu == "ideal":
             return global_var._simulator_instance(x, w)
         elif simu == "physical":
             outputs, _ = global_var._simulator_instance(x=x.unsqueeze(0).to(torch.int32), y=w.unsqueeze(0).to(torch.int32), inputType="int4", seed=None)
+            # outputs = global_var._simulator_instance(x=x.unsqueeze(0).to(torch.int32), y=w.unsqueeze(0).to(torch.int32).contiguous(), inputType="int4", seed=None)
             return outputs.squeeze()
         else:
             return torch.matmul(x, w)
