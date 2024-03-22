@@ -54,7 +54,7 @@ class Quantizer_GPTQ(nn.Module):
             if weight:
                 x = x.flatten(1)
                 if self.channel_group > 1:
-                    x = x.reshape(int(shape[0]/self.channel_group), -1) # cg=2, (2048, 3968*2)
+                    x = x.reshape(int(shape[0]/self.channel_group), -1) # cg=2, (4096,groupsize)->(2048, groupsize*2)
             else:
                 if len(shape) == 4:
                     x = x.permute([1, 0, 2, 3])
@@ -81,8 +81,8 @@ class Quantizer_GPTQ(nn.Module):
         xmax[tmp] = +1
 
         if self.maxq < 0:
-          self.scale = xmax
-          self.zero = xmin
+            self.scale = xmax
+            self.zero = xmin
         else:
             # shrink the range based on clip ratio
             self.scale = (xmax - xmin) * self.clip_ratio / self.maxq

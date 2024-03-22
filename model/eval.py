@@ -21,7 +21,7 @@ class MyDataset(Dataset):
             self.samples = F.pad(self.samples, (0, self.n_padded_samples*seq_len), mode='constant', value=0)
 
     def __len__(self):
-        return self.n_samples
+        return self.n_samples+self.n_padded_samples
     
     def __getitem__(self, index):
         data = self.samples[0, (index * self.seq_len):((index + 1) * self.seq_len)]
@@ -68,7 +68,7 @@ def llama_eval_parallel(model, testenc, dev):
             gather_nll = [torch.zeros_like(neg_log_likelihood) for _ in range(torch.distributed.get_world_size())]
             torch.distributed.all_gather(gather_nll, neg_log_likelihood)
             nlls.extend(gather_nll)
-    
+    nlls = nlls[:test_dataset.n_samples]
     ppl = torch.exp(torch.stack(nlls).sum() / test_dataset.n_samples)
 
     return ppl.item()

@@ -51,24 +51,24 @@ class QLinearLayer(nn.Module):
         return torch.matmul(x, w)
 
     @torch.no_grad
-    def _forward(self, x, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo, blocksize=128):
+    def _forward(self, x, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo, groupsize=128):
         # mix-precision matmul
         # assume x and w are both symmetrically quantized
         assert self.args.act_group_size == self.args.weight_group_size
-        assert x.dim() == 2 or x.shape[0] == 1, "only support bs=1"
+        assert x.dim() == 3 and x.shape[0] == 1, "only support bs=1"
         bs, seqlen, hidden_dim = x.shape
         x = x.squeeze()
         W = self.weight.T
         n_nonout = hidden_dim - self.args.keeper
         inp_scales_lo = inp_scales_lo.reshape(seqlen, -1)
-        inp_base_lo = inp_base_lo.reshape(seqlen, -1)
+        # inp_base_lo = inp_base_lo.reshape(seqlen, -1)
 
         y = torch.zeros((x.shape[0], W.shape[1]), dtype=torch.float16).to(x.device)
-        for i1 in range(0, n_nonout, blocksize):
-            i2 = min(i1 + blocksize, n_nonout)
+        for i1 in range(0, n_nonout, groupsize):
+            i2 = min(i1 + groupsize, n_nonout)
             x_block = x[:, i1:i2]
             w_block = W[i1:i2, :]
-            x_block_scales = inp_scales_lo[:, i1//blocksize].reshape(-1,1).to(torch.float32)
+            x_block_scales = inp_scales_lo[:, i1//groupsize].reshape(-1,1).to(torch.float32)
             w_block_scales = self.scales[:, i1].reshape(-1,1)
             if self.channel_group > 0:
                 w_block_scales = w_block_scales.repeat(1, self.channel_group).reshape(-1,1)
@@ -99,7 +99,7 @@ class QLinearLayer(nn.Module):
             ):
         if real_quant:
             # forward+dequant
-            y = self._forward(x, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo)
+            y = self._forward(x, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo, groupsize=16)
             if self.bias:
                 y = y + self.bias
         else:
