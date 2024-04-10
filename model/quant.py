@@ -128,17 +128,17 @@ def quantize_tensor_real(w: torch.tensor, n_bits, group_size, tiling, sym, clip_
     assert group_size == 0 or tiling == 0
     # assert w.is_contiguous(), "Input tensor is not contiguous"
 
-    w = w.squeeze()
-    newSavedShape = w.shape # Saved [row, columns]
+    # w = w.squeeze()
+    # newSavedShape = w.shape # Saved [row, columns]
 
-    if tiling > 0:
-        assert tiling == 16, "Currently only support tiling=16"
-        assert w.numel() % (tiling**2) == 0, f"shape {w.shape}, {w.numel()} is not divisible by {tiling**2}"
-        assert newSavedShape[0] % tiling == 0 and newSavedShape[1] % tiling == 0
+    # if tiling > 0:
+    #     assert tiling == 16, "Currently only support tiling=16"
+    #     assert w.numel() % (tiling**2) == 0, f"shape {w.shape}, {w.numel()} is not divisible by {tiling**2}"
+    #     assert newSavedShape[0] % tiling == 0 and newSavedShape[1] % tiling == 0
 
-        swapTensor = torch.rand(w.numel() // (tiling**2), (tiling**2), device=w.device, dtype=w.dtype)
-        tensor_to_blocks(w, swapTensor, tiling)
-        w, swapTensor = swapTensor, w
+    #     swapTensor = torch.rand(w.numel() // (tiling**2), (tiling**2), device=w.device, dtype=w.dtype)
+    #     tensor_to_blocks(w, swapTensor, tiling)
+    #     w, swapTensor = swapTensor, w
 
     if group_size > 0:
         assert w.shape[-1] % group_size == 0
@@ -189,31 +189,31 @@ def quantize_tensor_real(w: torch.tensor, n_bits, group_size, tiling, sym, clip_
             base = torch.round(-w_min/scales).clamp_(min=q_min, max=q_max)
         w = torch.clamp(torch.round(w / scales) + base, q_min, q_max)
     
-    if tiling > 0:
-        blocks_to_tensor(w, swapTensor, tiling)
-        w, swapTensor = swapTensor, w
-        del swapTensor
+    # if tiling > 0:
+    #     blocks_to_tensor(w, swapTensor, tiling)
+    #     w, swapTensor = swapTensor, w
+    #     del swapTensor
     
     return w.reshape(savedShape), scales, base
 
 @torch.no_grad()
-def quantize_tensor(w: torch.tensor, n_bits, group_size, tiling, sym, clip_ratio=1.0, exponential=False) -> torch.tensor:
+def quantize_tensor(w: torch.tensor, n_bits, group_size, tiling, sym, clip_ratio=1.0, exponential=False, return_scales=False) -> torch.tensor:
     savedShape = w.shape
     assert w.dim() == 2 or savedShape[0] == 1, "Current only support bsz=1"
     assert group_size == 0 or tiling == 0
     # assert w.is_contiguous(), "Input tensor is not contiguous"
 
-    w = w.squeeze()
-    newSavedShape = w.shape # Saved [row, columns]
+    # w = w.squeeze()
+    # newSavedShape = w.shape # Saved [row, columns]
 
-    if tiling > 0:
-        assert tiling == 16, "Currently only support tiling=16"
-        assert w.numel() % (tiling**2) == 0, f"shape {w.shape}, {w.numel()} is not divisible by {tiling**2}"
-        assert newSavedShape[0] % tiling == 0 and newSavedShape[1] % tiling == 0
+    # if tiling > 0:
+    #     assert tiling == 16, "Currently only support tiling=16"
+    #     assert w.numel() % (tiling**2) == 0, f"shape {w.shape}, {w.numel()} is not divisible by {tiling**2}"
+    #     assert newSavedShape[0] % tiling == 0 and newSavedShape[1] % tiling == 0
 
-        swapTensor = torch.rand(w.numel() // (tiling**2), (tiling**2), device=w.device, dtype=w.dtype)
-        tensor_to_blocks(w, swapTensor, tiling)
-        w, swapTensor = swapTensor, w
+    #     swapTensor = torch.rand(w.numel() // (tiling**2), (tiling**2), device=w.device, dtype=w.dtype)
+    #     tensor_to_blocks(w, swapTensor, tiling)
+    #     w, swapTensor = swapTensor, w
 
     if group_size > 0:
         assert w.shape[-1] % group_size == 0
@@ -264,11 +264,13 @@ def quantize_tensor(w: torch.tensor, n_bits, group_size, tiling, sym, clip_ratio
             base = torch.round(-w_min/scales).clamp_(min=q_min, max=q_max)
         w = (torch.clamp(torch.round(w / scales) + base, q_min, q_max) - base) * scales # 伪量化
     
-    if tiling > 0:
-        blocks_to_tensor(w, swapTensor, tiling)
-        w, swapTensor = swapTensor, w
-        del swapTensor
+    # if tiling > 0:
+    #     blocks_to_tensor(w, swapTensor, tiling)
+    #     w, swapTensor = swapTensor, w
+    #     del swapTensor
     
+    if return_scales:
+        return w.reshape(savedShape), scales, base
     return w.reshape(savedShape)
 
 @torch.no_grad()

@@ -7,7 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn import functional as F
 
-from odk_story4.ApprxPICPyTorch import ApprxPICPyTorch
+# from odk_story4.ApprxPICPyTorch import ApprxPICPyTorch
 
 class MyDataset(Dataset):
     def __init__(self, samples, seq_len, n_gpu) -> None:
@@ -36,7 +36,7 @@ def pattern_match(patterns, source_list):
     return list(task_names)
 
 @torch.no_grad()
-def llama_eval_parallel(model, testenc, dev):
+def llama_eval_parallel(model, testenc):
     model = model.cuda()
     model.eval()
     seqlen = model.seqlen
@@ -48,12 +48,7 @@ def llama_eval_parallel(model, testenc, dev):
                              sampler=DistributedSampler(test_dataset))
     
     model = torch.nn.parallel.DistributedDataParallel(model, broadcast_buffers=False, find_unused_parameters=True)
-
-    # model = torch.nn.parallel.DistributedDataParallel(model, 
-    #                                                   device_ids=[0,1], 
-    #                                                   output_device=0, 
-    #                                                   broadcast_buffers=False,
-    #                                                   find_unused_parameters=True)
+    
     nlls = []
     with torch.no_grad():
         for inp, label in tqdm(test_loader, desc="Eval"):
@@ -74,10 +69,36 @@ def llama_eval_parallel(model, testenc, dev):
     return ppl.item()
 
 @torch.no_grad()
+def llama_eval2(model, testenc):
+    model = model.cuda()
+    model.eval()
+    seqlen = model.seqlen
+
+    testenc = testenc.input_ids
+    test_dataset = MyDataset(testenc, seqlen, n_gpu=1)
+    test_loader = DataLoader(dataset=test_dataset, batch_size=1)
+    
+    nlls = []
+    with torch.no_grad():
+        for inp, label in tqdm(test_loader, desc="Eval"):
+            batch = inp.cuda()
+            lm_logits = model(batch).logits
+            shift_logits = lm_logits[:, :-1, :].contiguous() # 结果的前n个token, (1, 4095, 32000)
+            shift_labels = label.cuda() # label的后n个token, (1, 4095)
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            neg_log_likelihood = loss.float()
+            nlls.append(neg_log_likelihood)
+    nlls = nlls[:test_dataset.n_samples]
+    ppl = torch.exp(torch.stack(nlls).sum() / test_dataset.n_samples)
+
+    return ppl.item()
+
+@torch.no_grad()
 def llama_eval(model, testenc, dev):
     model.eval()
     testenc = testenc.input_ids
-    nsamples = 4 #testenc.numel() // model.seqlen
+    nsamples = testenc.numel() // model.seqlen
     layers = model.model.layers
 
     model.model.embed_tokens = model.model.embed_tokens.to(dev)

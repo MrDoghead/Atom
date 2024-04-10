@@ -92,7 +92,11 @@ if __name__ == '__main__':
         help='Whether to perform static quantization (For activtions). Default is dynamic. (Deprecated in Atom)'
     )
     parser.add_argument(
-        '--weight_group_size', type=int, default=0, choices=[0, 32, 64, 128, 256, 384, 768],
+        '--block_size', type=int, default=128, choices=[16, 32, 64, 128, 256, 384, 512, 768],
+        help='Block size when quantizing weights. Using 128 as default quantization group.'
+    )
+    parser.add_argument(
+        '--weight_group_size', type=int, default=0, choices=[0, 16, 32, 64, 128, 256, 384, 768],
         help='Group size when quantizing weights. Using 128 as default quantization group.'
     )
     parser.add_argument(
@@ -100,7 +104,7 @@ if __name__ == '__main__':
         help='Group size of channels that will quantize together. (only for weights now)'
     )
     parser.add_argument(
-        '--act_group_size', type=int, default=0, choices=[0, 64, 128, 256, 384, 768],
+        '--act_group_size', type=int, default=0, choices=[0, 16, 32, 64, 128, 256, 384, 768],
         help='Group size when quantizing activations. Using 128 as default quantization group.'
     )
     parser.add_argument(
@@ -183,8 +187,35 @@ if __name__ == '__main__':
         "--real_quant", action="store_true",
         help='Whether to apply real quantize.'
     )
+    parser.add_argument(
+        "--text_completion", action="store_true",
+        help="run text complication on omac"
+    )
+    parser.add_argument(
+        '--temperature', type=float, default=0.6,
+        help="The temperature value for controlling randomness in generation."
+    )
+    parser.add_argument(
+        '--top_p', type=float, default=0.9,
+        help="The top-p sampling parameter for controlling diversity in generation."
+    )
+    parser.add_argument(
+        '--max_seq_len', type=int, default=128,
+        help="The maximum sequence length for input prompts."
+    )
+    parser.add_argument(
+        '--max_gen_len', type=int, default=64,
+        help="The maximum length of generated sequences"
+    )
+    parser.add_argument(
+        '--max_batch_len', type=int, default=4,
+        help="The maximum batch size for generating sequences."
+    )
+    parser.add_argument(
+        "--text", type=str, default="In a machine learning context, Transformer is ",
+        help="prompts for the text completion"
+    )
 
-    
     args = parser.parse_args()
     print("args:", args)
     # global_var.init_ideal_simulator()
@@ -201,6 +232,7 @@ if __name__ == '__main__':
         quantize_model_gptq_func = quantize_model_gptq_llama
         quantize_model_func = quantize_model_llama
         eval_func = llama_eval
+        eval_func2 = llama_eval2
     elif "opt" in args.model.lower():
         model = get_opt(args.model)
         get_act_stats_func = get_act_stats_opt
@@ -274,14 +306,14 @@ if __name__ == '__main__':
             else:
                 model = quantize_model_func(model, device=DEV, args=args)
         # save model
-        # if (args.abits < 16 or args.wbits < 16) and args.save_dir:
-        #     print(f"full qmodel is saved at {args.save_dir}/")
-        #     torch.save(model, f'{args.save_dir}/{model_name}_w{args.wbits}a{args.abits}_{args.dataset}.pt')
+        if (args.abits < 16 or args.wbits < 16) and args.save_dir:
+            print(f"full qmodel is saved at {args.save_dir}/")
+            torch.save(model, f'{args.save_dir}/{model_name}_w{args.wbits}a{args.abits}_{args.dataset}.pt')
     else:
         print(f"load qmodel from {args.load_qmodel}")
         model = torch.load(args.load_qmodel)
 
-    if args.real_quant:
+    if args.real_quant and not args.load_qmodel:
         assert "llama" in args.model.lower(), "only support llama"
         model = requantize_model_llama(model, device=DEV, args=args)
         torch.save(model, f'{args.save_dir}/{model_name}_w{args.wbits}a{args.abits}_{args.dataset}_fake4bit.pt')
@@ -298,6 +330,7 @@ if __name__ == '__main__':
             )
             print(f"Evaluating {dataset} ...")
             ppl = eval_func(model, testloader, DEV)
+            # ppl = eval_func2(model, testloader)
 
             print(f"targetResult,{dataset},{ppl:.3f}")
     
@@ -334,8 +367,8 @@ if __name__ == '__main__':
             lm.model = lm.model.to(lm.device)
 
         results = {}
-        tasks_str = "piqa,arc_easy,arc_challenge,boolq,hellaswag,winogrande"
-        # tasks_str = "piqa"
+        # tasks_str = "piqa,arc_easy,arc_challenge,boolq,hellaswag,winogrande"
+        tasks_str = "piqa"
         task_names = pattern_match(tasks_str.split(","), lm_tasks.ALL_TASKS)
         print(f"Selected Tasks: {task_names}")
 
@@ -356,4 +389,48 @@ if __name__ == '__main__':
             else:
                 print(f"INFO {task_name} : {results_dict[task_name]['acc']*100:.2f}")
 
+    if args.text_completion:
+        print("Testing text completion")
+        if "llama" in model_name:
+            from transformers import LlamaTokenizer 
+            tokenizer = LlamaTokenizer.from_pretrained(args.model, use_fast=False)
+            if tokenizer.bos_token_id != 1 or tokenizer.eos_token_id != 2:
+                try:
+                    tokenizer.bos_token_id = 1
+                    tokenizer.eos_token_id = 2
+                    print(f"bos/eos tokens updated: {tokenizer.bos_token_id=},  {tokenizer.eos_token_id=}")
+                except AttributeError:
+                    pass
+                    print(f"bos/eos tokens unchanged: {tokenizer.bos_token_id=},  {tokenizer.eos_token_id=}")
+        else:
+            from transformers import AutoTokenizer 
+            tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False, legacy=False)
 
+        for layer in model.model.layers:
+            layer.real_quant = args.real_quant
+
+        prompts = args.text
+        print(f"Prompts: {prompts}")
+        input_ids = tokenizer.encode(prompts, return_tensors="pt").cuda()
+        assert len(input_ids) < args.max_seq_len
+        model = model.cuda()
+        torch.cuda.synchronize()
+        start_time = time.perf_counter()
+        with torch.no_grad():
+            generate_ids = model.generate(
+                input_ids,
+                do_sample=True,
+                max_length=args.max_gen_len,
+                top_p=args.top_p,
+                temperature=args.temperature,
+            )
+        torch.cuda.synchronize()
+        end_time = time.perf_counter()
+        dur_time = end_time - start_time
+        output = tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        # print(tokenizer.decode([el.item() for el in generate_ids[0]]))
+        print(f"Text completion output:\n{output}")
+        print(f"Generated length: {len(output.split())-len(prompts.split())}\nTime cost: {dur_time} s")
+        print("Done")
+
+        

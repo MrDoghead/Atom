@@ -189,7 +189,7 @@ class GPTQ:
         self.H += inp.matmul(inp.t())
     
     def fasterquant(
-        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, real_quant=False
+        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False
     ):
         assert actorder==False, "we don't deal with actorder inside GPTQ for our implementation."
         W = self.layer.weight.data.clone()
@@ -225,6 +225,7 @@ class GPTQ:
         
         self.layer.maxq = self.quantizer.maxq
         self.layer.channel_group = self.quantizer.channel_group
+        self.layer.group_size = groupsize
         self.layer.scales = torch.zeros((int(W.shape[0]/self.quantizer.channel_group), self.n_nonout))
         self.layer.zeros = torch.zeros((int(W.shape[0]/self.quantizer.channel_group), self.n_nonout))
         for i1 in range(0, self.n_nonout, blocksize):
@@ -274,11 +275,9 @@ class GPTQ:
                 elif self.keeper_precision == 2:
                     keep_w = fake_quantize_quarter_E4M3(keep_w)
                 elif self.keeper_precision == 3:
-                    if real_quant:
-                        _, scales_hi, base_hi = quantize_tensor_real(keep_w, n_bits=8, group_size=0, tiling=0, sym=True, exponential=False)
-                        self.layer.keep_scales = scales_hi
-                        self.layer.keep_zeros = base_hi
-                    keep_w = quantize_tensor(keep_w, n_bits=8, group_size=0, tiling=0, sym=True, exponential=False)
+                    keep_w, scales_hi, base_hi = quantize_tensor(keep_w, n_bits=8, group_size=0, tiling=0, sym=True, exponential=False, return_scales=True)
+                    self.layer.keep_scales = scales_hi
+                    self.layer.keep_zeros = base_hi
 
             Q[:,self.n_nonout:] = keep_w
 

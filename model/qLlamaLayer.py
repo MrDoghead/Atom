@@ -5,6 +5,9 @@ import math
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm, LlamaAttention, LlamaMLP
 from quant import Quantizer, fake_quantize_quarter_E5M2, fake_quantize_quarter_E4M3, quantize_gptq, quantize_tensor, quantize_tensor_channel_group
 from qLinearLayer import QLinearLayer
+from transformers.cache_utils import Cache, DynamicCache
+from transformers.utils import logging
+logger = logging.get_logger(__name__)
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
@@ -98,7 +101,7 @@ class QLlamaDecoderLayer(nn.Module):
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states # 输入(2048,4096)
 
-        if self.real_quant:
+        if self.real_quant: # scales_lo and base_lo have zeros if keeper > 0
             hidden_states, scales_hi, base_hi, scales_lo, base_lo = self.input_layernorm(hidden_states, real_quant=self.real_quant)
         else:
             hidden_states = self.input_layernorm(hidden_states)
@@ -200,6 +203,14 @@ class QLlamaAttention(nn.Module):
         self.max_position_embeddings = originalAttn.max_position_embeddings
         self.rope_theta = originalAttn.rope_theta
 
+        self.layer_idx = originalAttn.layer_idx
+        if self.layer_idx is None:
+            logger.warning_once(
+                f"Instantiating {self.__class__.__name__} without passing `layer_idx` is not recommended and will "
+                "to errors during the forward call, if caching is used. Please make sure to provide a `layer_idx` "
+                "when creating this class."
+            )
+
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
@@ -251,7 +262,8 @@ class QLlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        # past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         real_quant=False,
@@ -273,8 +285,19 @@ class QLlamaAttention(nn.Module):
                         ).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
+        # if past_key_value is not None:
+        #     # kv_seq_len += past_key_value[0].shape[-2]
+        #     # past_key_value stores the Key and Value states as a list of tensors, one for each layer. 
+        #     # The expected shape for each tensor is `[batch_size, num_heads, seq_len, head_dim]`.
+        #     kv_seq_len += past_key_value[0][0].shape[-2]
         if past_key_value is not None:
-            kv_seq_len += past_key_value[0].shape[-2]
+            if self.layer_idx is None:
+                raise ValueError(
+                    f"The cache structure has changed since version v4.36. If you are using {self.__class__.__name__} "
+                    "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
+                    "with a layer index."
+                )
+            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
         
         # Fake quantize the key_states.
         # Preserve the position embedding info by first quantize.
@@ -290,12 +313,14 @@ class QLlamaAttention(nn.Module):
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len) # (2048, 128) 
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids) # [bsz, nh, t, hd]
 
+        # if past_key_value is not None:
+        #     # reuse k, v, self_attention
+        #     key_states = torch.cat([past_key_value[0], key_states], dim=2)
+        #     value_states = torch.cat([past_key_value[1], value_states], dim=2)
+        # past_key_value = (key_states, value_states) if use_cache else None
         if past_key_value is not None:
-            # reuse k, v, self_attention
-            key_states = torch.cat([past_key_value[0], key_states], dim=2)
-            value_states = torch.cat([past_key_value[1], value_states], dim=2)
-
-        past_key_value = (key_states, value_states) if use_cache else None
+            cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)

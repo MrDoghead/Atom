@@ -280,7 +280,7 @@ def quantize_model_gptq_llama(model, device, args, dataloader, real_quant=False)
             
             for name in subset:
                 gptq[name].fasterquant(
-                    percdamp=args.percdamp, groupsize=args.weight_group_size, real_quant=real_quant
+                    blocksize=args.block_size, percdamp=args.percdamp, groupsize=args.weight_group_size
                 )
                 quantizers['model.layers.%d.%s' % (i, name)] = gptq[name].quantizer.cpu()
                 gptq[name].free()
