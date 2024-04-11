@@ -215,6 +215,10 @@ if __name__ == '__main__':
         "--text", type=str, default="In a machine learning context, Transformer is ",
         help="prompts for the text completion"
     )
+    parser.add_argument(
+        "--interface", type=str, default="cmdline", choices=["cmdline", "gradio"],
+        help="run chatbot interface"
+    )
 
     args = parser.parse_args()
     print("args:", args)
@@ -311,7 +315,7 @@ if __name__ == '__main__':
             torch.save(model, f'{args.save_dir}/{model_name}_w{args.wbits}a{args.abits}_{args.dataset}.pt')
     else:
         print(f"load qmodel from {args.load_qmodel}")
-        model = torch.load(args.load_qmodel)
+        # model = torch.load(args.load_qmodel)
 
     if args.real_quant and not args.load_qmodel:
         assert "llama" in args.model.lower(), "only support llama"
@@ -391,46 +395,131 @@ if __name__ == '__main__':
 
     if args.text_completion:
         print("Testing text completion")
-        if "llama" in model_name:
-            from transformers import LlamaTokenizer 
-            tokenizer = LlamaTokenizer.from_pretrained(args.model, use_fast=False)
-            if tokenizer.bos_token_id != 1 or tokenizer.eos_token_id != 2:
-                try:
-                    tokenizer.bos_token_id = 1
-                    tokenizer.eos_token_id = 2
-                    print(f"bos/eos tokens updated: {tokenizer.bos_token_id=},  {tokenizer.eos_token_id=}")
-                except AttributeError:
-                    pass
-                    print(f"bos/eos tokens unchanged: {tokenizer.bos_token_id=},  {tokenizer.eos_token_id=}")
-        else:
-            from transformers import AutoTokenizer 
-            tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False, legacy=False)
+        if args.interface == "cmdline":
+            if "llama" in model_name:
+                from transformers import LlamaTokenizer 
+                tokenizer = LlamaTokenizer.from_pretrained(args.model, use_fast=False)
+                if tokenizer.bos_token_id != 1 or tokenizer.eos_token_id != 2:
+                    try:
+                        tokenizer.bos_token_id = 1
+                        tokenizer.eos_token_id = 2
+                        print(f"bos/eos tokens updated: {tokenizer.bos_token_id=},  {tokenizer.eos_token_id=}")
+                    except AttributeError:
+                        pass
+                        print(f"bos/eos tokens unchanged: {tokenizer.bos_token_id=},  {tokenizer.eos_token_id=}")
+            else:
+                from transformers import AutoTokenizer 
+                tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False, legacy=False)
 
-        for layer in model.model.layers:
-            layer.real_quant = args.real_quant
+            for layer in model.model.layers:
+                layer.real_quant = args.real_quant
 
-        prompts = args.text
-        print(f"Prompts: {prompts}")
-        input_ids = tokenizer.encode(prompts, return_tensors="pt").cuda()
-        assert len(input_ids) < args.max_seq_len
-        model = model.cuda()
-        torch.cuda.synchronize()
-        start_time = time.perf_counter()
-        with torch.no_grad():
-            generate_ids = model.generate(
-                input_ids,
-                do_sample=True,
-                max_length=args.max_gen_len,
-                top_p=args.top_p,
-                temperature=args.temperature,
-            )
-        torch.cuda.synchronize()
-        end_time = time.perf_counter()
-        dur_time = end_time - start_time
-        output = tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-        # print(tokenizer.decode([el.item() for el in generate_ids[0]]))
-        print(f"Text completion output:\n{output}")
-        print(f"Generated length: {len(output.split())-len(prompts.split())}\nTime cost: {dur_time} s")
-        print("Done")
+            prompts = args.text
+            print(f"Prompts: {prompts}")
+            input_ids = tokenizer.encode(prompts, return_tensors="pt").cuda()
+            assert len(input_ids) < args.max_seq_len
+            model.eval()
+            model = model.cuda()
+            torch.cuda.synchronize()
+            start_time = time.perf_counter()
+            with torch.no_grad():
+                generate_ids = model.generate(
+                    input_ids,
+                    do_sample=True,
+                    max_length=args.max_gen_len,
+                    top_p=args.top_p,
+                    temperature=args.temperature,
+                )
+            torch.cuda.synchronize()
+            end_time = time.perf_counter()
+            dur_time = end_time - start_time
+            output = tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+            # print(tokenizer.decode([el.item() for el in generate_ids[0]]))
+            print(f"Text completion output:\n{output}")
+            print(f"Generated length: {len(output.split())-len(prompts.split())}\nTime cost: {dur_time} s")
+            print("Done")
+        # text completion using gradio, ref: https://www.kdnuggets.com/2023/06/build-ai-chatbot-5-minutes-hugging-face-gradio.html
+        elif args.interface == "gradio":
+            print("Start gradio ...")
+            import gradio as gr
+            title = f"{model_name} ChatBot"
+            description = "A demo of running llm on the omac simulator"
+            examples = [["How are you?"], ["what do you think of apple?"]]
 
-        
+            if "llama" in model_name:
+                from transformers import LlamaTokenizer 
+                tokenizer = LlamaTokenizer.from_pretrained(args.model, use_fast=False)
+                if tokenizer.bos_token_id != 1 or tokenizer.eos_token_id != 2:
+                    try:
+                        tokenizer.bos_token_id = 1
+                        tokenizer.eos_token_id = 2
+                        print(f"bos/eos tokens updated: {tokenizer.bos_token_id=},  {tokenizer.eos_token_id=}")
+                    except AttributeError:
+                        pass
+                        print(f"bos/eos tokens unchanged: {tokenizer.bos_token_id=},  {tokenizer.eos_token_id=}")
+            else:
+                from transformers import AutoTokenizer 
+                tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False, legacy=False)
+
+            for layer in model.model.layers:
+                layer.real_quant = args.real_quant
+            model.eval()
+            model = model.cuda()
+
+            def predict(input, history=[], top_p=args.top_p, temperature=args.temperature):
+                print(f"input: {input}")
+                # tokenize the new input sentence
+                # new_user_input_ids = tokenizer.encode(
+                #     input + tokenizer.eos_token, return_tensors="pt"
+                # )
+                new_user_input_ids = tokenizer.encode(input, return_tensors="pt")
+
+                # append the new user input tokens to the chat history
+                # bot_input_ids = torch.cat([torch.LongTensor(history), new_user_input_ids], dim=-1)
+                bot_input_ids = new_user_input_ids.cuda()
+
+                # generate a response
+                generate_ids = model.generate(
+                    bot_input_ids, 
+                    do_sample=True,
+                    max_length=args.max_gen_len,
+                    top_p=top_p,
+                    temperature=temperature,
+                ).tolist()
+
+                # convert the tokens to text, and then split the responses into lines
+                # response = tokenizer.decode(history[0]).split(tokenizer.eos_token)
+                # print('decoded_response: '+str(response))
+                # response = [
+                #     (response[i], response[i + 1]) for i in range(0, len(response) - 1, 2)
+                # ]  # convert to tuples of list
+                # print('response-->>'+str(response))
+
+                output = tokenizer.decode(generate_ids[0], skip_special_tokens=True)
+                history.append((input, output[len(input):]))
+                response = history
+                return response, history
+            
+            # gr.Interface(
+            #     fn=predict,
+            #     title=title,
+            #     description=description,
+            #     examples=examples,
+            #     inputs=["text", "state"],
+            #     outputs=["chatbot", "state"],
+            #     theme="finlaymacklon/boxy_violet",
+            # ).launch(share=True)
+
+            gr.Interface(
+                fn=predict,
+                title=title,
+                description=description,
+                examples=examples,
+                inputs=["text", 
+                        "state", 
+                        gr.Slider(0.1, 1, args.top_p, step=0.05, label="top_p"), 
+                        gr.Slider(0.1, 10, args.temperature, step=0.1, label="temperature")
+                        ],
+                outputs=["chatbot", "state"],
+                theme="finlaymacklon/boxy_violet",
+            ).launch(share=True)
