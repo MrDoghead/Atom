@@ -144,13 +144,14 @@ class Quantizer_GPTQ(nn.Module):
         return torch.all(self.scale != 0)
 
 class GPTQ:
+    model_input_names = ["input_ids", "attention_mask"]
     def __init__(self, layer, n_out, keeper_precision=0):
         self.layer = layer
         self.dev = self.layer.weight.device
-        W = layer.weight.data.clone()
+        W = layer.weight.clone()
 
         if isinstance(self.layer, nn.Conv2d): 
-            W = W.flatten(1)
+            W = W.flatten(1) # (out_channel, -1), then per-channel quantization
         if isinstance(self.layer, transformers.Conv1D):
             W = W.t()
         
@@ -160,8 +161,15 @@ class GPTQ:
         self.nsamples = 0 
         self.keeper_precision = keeper_precision
 
-        self.n_out = n_out
-        self.n_nonout = W.shape[1] - n_out
+        # self.n_out = n_out
+        # self.n_nonout = W.shape[1] - n_out
+
+        # llama7b debug for omac
+        self.n_nonout = W.shape[1] - n_out if W.shape[1] == 4096 else 4096-n_out # int4 3072
+        self.n_out = W.shape[1] - self.n_nonout # int8 7936
+        self.layer.n_out = self.n_out
+        self.layer.n_nonout = self.n_nonout
+        
         del W
 
     def add_batch(self, inp, out):
@@ -189,7 +197,7 @@ class GPTQ:
         self.H += inp.matmul(inp.t())
     
     def fasterquant(
-        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False
+        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, name="", detail=False
     ):
         assert actorder==False, "we don't deal with actorder inside GPTQ for our implementation."
         W = self.layer.weight.data.clone()
@@ -198,6 +206,7 @@ class GPTQ:
         if isinstance(self.layer, transformers.Conv1D):
             W = W.t()
         W = W.float()
+        print(f"W: {name}\t shape: {W.shape}\t int4+8: {self.n_nonout}+{self.n_out}")
         
         tick = time.time()
         
@@ -263,8 +272,12 @@ class GPTQ:
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
         torch.cuda.synchronize()
-        # print('time %.2f' % (time.time() - tick))
-        # print('error', torch.sum(Losses).item())
+        error = torch.sum(Losses).item()
+        if detail:
+            # print(f"[GPTQ] weight: {name}\t error: {torch.sum(Losses).item()}\t time: {(time.time() - tick)}")
+            with open("logs/gptq.log", 'a') as f:
+                log_str = f"weight: {name}\t error: {error}\t time: {(time.time() - tick)}"
+                f.write(log_str+"\n")
         
         if self.n_out > 0:
             keep_w = W[:,self.n_nonout:]
@@ -291,7 +304,33 @@ class GPTQ:
         del Losses
         del W
 
+        return error
+
     def free(self):
         self.H = None
         torch.cuda.empty_cache()
         gc.collect()
+
+class Observer:
+
+    def __init__(self, topk=32):
+        self.loss_list = []
+        self.topk = topk
+
+    def submit(self, name: str, layerid: int, gptq: GPTQ, error: float):
+
+        item = (name, layerid, {'gptq': gptq, 'error': error})
+
+        if len(self.loss_list) < self.topk:
+            self.loss_list.append(item)
+            return
+
+        min_error = error
+        min_idx = -1
+        for idx, data in enumerate(self.loss_list):
+            if min_error > data[2]['error']:
+                min_idx = idx
+                min_error = data[2]['error']
+
+        if min_idx >= 0:
+            self.loss_list[min_idx] = item

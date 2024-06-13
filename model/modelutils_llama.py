@@ -5,8 +5,10 @@ from tqdm import tqdm
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from qLinearLayer import find_qlinear_layers
 from qLlamaLayer import QLlamaDecoderLayer
-from gptq import GPTQ, Quantizer_GPTQ
+from gptq import GPTQ, Quantizer_GPTQ, Observer
+from utils import gen_conditions
 from functools import partial
+from texttable import Texttable
 
 from quant import quantize_activation_wrapper, quantize_attn_v_wrapper, quantize_attn_k_wrapper
 
@@ -142,13 +144,13 @@ def requantize_model_llama(model, device, args):
         
         m.real_quant = True
         m = m.to(device)
-        m.self_attn.q_proj.requant(groupsize=args.weight_group_size)
-        m.self_attn.k_proj.requant(groupsize=args.weight_group_size)
-        m.self_attn.v_proj.requant(groupsize=args.weight_group_size)
-        m.self_attn.o_proj.requant(groupsize=args.weight_group_size)
-        m.mlp.gate_proj.requant(groupsize=args.weight_group_size)
-        m.mlp.up_proj.requant(groupsize=args.weight_group_size)
-        m.mlp.down_proj.requant(groupsize=args.weight_group_size)
+        m.self_attn.q_proj.requant(blocksize=args.block_size, groupsize=args.weight_group_size)
+        m.self_attn.k_proj.requant(blocksize=args.block_size, groupsize=args.weight_group_size)
+        m.self_attn.v_proj.requant(blocksize=args.block_size, groupsize=args.weight_group_size)
+        m.self_attn.o_proj.requant(blocksize=args.block_size, groupsize=args.weight_group_size)
+        m.mlp.gate_proj.requant(blocksize=args.block_size, groupsize=args.weight_group_size)
+        m.mlp.up_proj.requant(blocksize=args.block_size, groupsize=args.weight_group_size)
+        m.mlp.down_proj.requant(blocksize=args.block_size, groupsize=args.weight_group_size)
 
         layers[i] = m.cpu()
         torch.cuda.empty_cache()
@@ -230,7 +232,13 @@ def quantize_model_gptq_llama(model, device, args, dataloader, real_quant=False)
     position_ids = cache['position_ids']
 
     quantizers = {}
-    for i in tqdm(range(len(layers))):
+    observer = Observer()
+    for i in range(len(layers)):
+        print(f'Quantizing layer {i+1}/{len(layers)}..')
+        print('+------------------+--------------+------------+-----------+-------+')
+        print('|       name       | weight_error | fp_inp_SNR | q_inp_SNR | time  |')
+        print('+==================+==============+============+===========+=======+')
+
         m = None
         if isinstance(layers[i], LlamaDecoderLayer):
             m = QLlamaDecoderLayer(
@@ -279,11 +287,15 @@ def quantize_model_gptq_llama(model, device, args, dataloader, real_quant=False)
                 h.remove()
             
             for name in subset:
-                gptq[name].fasterquant(
-                    blocksize=args.block_size, percdamp=args.percdamp, groupsize=args.weight_group_size
+                error = gptq[name].fasterquant(
+                    blocksize=args.block_size, percdamp=args.percdamp, groupsize=args.weight_group_size,
+                    actorder=False, name=f"layers.{i}.{name}", detail=False
                 )
-                quantizers['model.layers.%d.%s' % (i, name)] = gptq[name].quantizer.cpu()
-                gptq[name].free()
+                # quantizers['model.layers.%d.%s' % (i, name)] = gptq[name].quantizer.cpu()
+                if args.observe:
+                    observer.submit(name=name, layerid=i, gptq=gptq[name], error=error)
+                else:
+                    gptq[name].free()
 
             del gptq
 
@@ -296,6 +308,43 @@ def quantize_model_gptq_llama(model, device, args, dataloader, real_quant=False)
         gc.collect()
 
         inps, outs = outs, inps
+        print('+------------------+--------------+------------+-----------+-------+')
+        print('\n')
+    
+    if args.observe:
+        observer.print()
+        conditions = gen_conditions(args.wbits, args.groupsize)
+        for item in observer.items():
+            name = item[0]
+            layerid = item[1]
+            gptq = item[2]['gptq']
+            error = item[2]['error']
+            target = error / 2
 
+            table = Texttable()
+            table.header(['wbits', 'groupsize', 'error'])
+            table.set_cols_dtype(['i', 'i', 'f'])
+            table.add_row([args.wbits, args.groupsize, error])
+
+            print('Optimizing {} {} ..'.format(name, layerid))
+            for wbits, groupsize in conditions:
+
+                if error < target:
+                    # if error dropped 50%, skip
+                    break
+                
+                gptq.quantizer.configure(wbits, perchannel=True, sym=args.sym, mse=False)
+
+                scale, zero, g_idx, error = gptq.fasterquant(
+                    blocksize=args.block_size, percdamp=args.percdamp, groupsize=groupsize, actorder=args.act_order, name=name)
+
+                table.add_row([wbits, groupsize, error])
+                quantizers['model.layers.%d.%s' % (layerid, name)] = (gptq.quantizer.cpu(), scale.cpu(), zero.cpu(), g_idx.cpu(), wbits, groupsize)
+
+            print(table.draw())
+            print('\n')
+            gptq.layer.to('cpu')
+            gptq.free()
+    
     model.config.use_cache = use_cache
     return model

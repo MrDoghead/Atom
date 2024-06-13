@@ -7,7 +7,11 @@ from quant import Quantizer, fake_quantize_quarter_E5M2, fake_quantize_quarter_E
 from qLinearLayer import QLinearLayer
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.utils import logging
+import global_var
+
 logger = logging.get_logger(__name__)
+
+QUANT_MATMUL = False
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
@@ -274,12 +278,30 @@ class QLlamaAttention(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
+        if global_var.debug:
+            print("DecodeLayer:", self.layer_idx)
+            file_name = global_var._simulator_instance.instFolder.split("/")[-1]
+            with open(f"./logs/omac_{file_name}.txt", "a") as f:
+                full_str = f"DecodeLayer-{self.layer_idx}\n" + f"attn q_proj\n"
+                f.write(full_str)
         query_states = self.q_proj(
                                 hidden_states, real_quant, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo
                         ).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        if global_var.debug:
+                file_name = global_var._simulator_instance.instFolder.split("/")[-1]
+                with open(f"./logs/omac_{file_name}.txt", "a") as f:
+                    full_str = f"attn k_proj\n"
+                    f.write(full_str)
         key_states = self.k_proj(
                                 hidden_states, real_quant, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo
                         ).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        
+        if global_var.debug:
+                file_name = global_var._simulator_instance.instFolder.split("/")[-1]
+                with open(f"./logs/omac_{file_name}.txt", "a") as f:
+                    full_str = f"attn v_proj\n"
+                    f.write(full_str)
         value_states = self.v_proj(
                                 hidden_states, real_quant, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo
                         ).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -322,8 +344,13 @@ class QLlamaAttention(nn.Module):
             cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        key_states = repeat_kv(key_states, self.num_key_value_groups) # GQA
         value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+        # tmp test
+        if QUANT_MATMUL:
+            query_states = quantize_tensor(query_states, n_bits=4, group_size=128, tiling=0, sym=1, clip_ratio=0.9)
+            key_states = quantize_tensor(key_states, n_bits=4, group_size=128, tiling=0, sym=1, clip_ratio=0.9)
 
         attn_weights = torch.matmul(query_states.to(torch.float32), key_states.transpose(2, 3).to(torch.float32)) / math.sqrt(self.head_dim) # 没有量化 fp32
 
@@ -346,6 +373,11 @@ class QLlamaAttention(nn.Module):
         # Fake quantize the value_states
         if self.q_kv_cache and self.abits < 16:
             value_states = self.v_quant(value_states)
+
+        # temp test
+        if QUANT_MATMUL:
+            attn_weights = quantize_tensor(attn_weights, n_bits=4, group_size=128, tiling=0, sym=1, clip_ratio=0.9)
+            value_states = quantize_tensor(value_states, n_bits=4, group_size=128, tiling=0, sym=1, clip_ratio=0.9)
 
         attn_output = torch.matmul(attn_weights, value_states) # 没有量化
 
@@ -371,6 +403,12 @@ class QLlamaAttention(nn.Module):
         else:
             scales_hi, base_hi, scales_lo, base_lo = None, None, None, None
 
+
+        if global_var.debug:
+                file_name = global_var._simulator_instance.instFolder.split("/")[-1]
+                with open(f"./logs/omac_{file_name}.txt", "a") as f:
+                    full_str = f"attn o_proj\n"
+                    f.write(full_str)
         attn_output = self.o_proj(
                         attn_output, 
                         real_quant=real_quant,
@@ -430,8 +468,20 @@ class QLlamaMLP(nn.Module):
         ):
         # input X: [b, seq, dim]: quantized
         if real_quant:
+            if global_var.debug:
+                file_name = global_var._simulator_instance.instFolder.split("/")[-1]
+                with open(f"./logs/omac_{file_name}.txt", "a") as f:
+                    full_str = f"mlp gate_proj\n"
+                    f.write(full_str)
             gate_state = self.gate_proj(x, real_quant, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo)
+
+            if global_var.debug:
+                file_name = global_var._simulator_instance.instFolder.split("/")[-1]
+                with open(f"./logs/omac_{file_name}.txt", "a") as f:
+                    full_str = f"mlp up_proj\n"
+                    f.write(full_str)
             up_state = self.up_proj(x, real_quant, inp_scales_hi, inp_base_hi, inp_scales_lo, inp_base_lo)
+
             tmpResult = self.act_fn(gate_state) * up_state
         else:
             tmpResult = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
@@ -444,6 +494,12 @@ class QLlamaMLP(nn.Module):
             scales_hi, base_hi, scales_lo, base_lo = None, None, None, None
         else:
             scales_hi, base_hi, scales_lo, base_lo = None, None, None, None
+        
+        if global_var.debug:
+            file_name = global_var._simulator_instance.instFolder.split("/")[-1]
+            with open(f"./logs/omac_{file_name}.txt", "a") as f:
+                full_str = f"mlp down_proj\n"
+                f.write(full_str)
         mlp_output = self.down_proj(tmpResult, real_quant, scales_hi, base_hi, scales_lo, base_lo)
 
         return mlp_output

@@ -1,4 +1,5 @@
 import torch
+import torch.distributed
 import torch.nn as nn
 from tqdm import tqdm
 import fnmatch
@@ -48,7 +49,9 @@ def llama_eval_parallel(model, testenc):
                              sampler=DistributedSampler(test_dataset))
     
     model = torch.nn.parallel.DistributedDataParallel(model, broadcast_buffers=False, find_unused_parameters=True)
-    
+    if torch.distributed.get_rank() == 0:
+        print(f"num of sample: {test_dataset.n_samples} {test_dataset.n_padded_samples} {len(test_dataset)}")
+
     nlls = []
     with torch.no_grad():
         for inp, label in tqdm(test_loader, desc="Eval"):
@@ -73,6 +76,7 @@ def llama_eval2(model, testenc):
     model = model.cuda()
     model.eval()
     seqlen = model.seqlen
+    # model = torch.compile(model)
 
     testenc = testenc.input_ids
     test_dataset = MyDataset(testenc, seqlen, n_gpu=1)
@@ -89,6 +93,7 @@ def llama_eval2(model, testenc):
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
             neg_log_likelihood = loss.float()
             nlls.append(neg_log_likelihood)
+            exit()
     nlls = nlls[:test_dataset.n_samples]
     ppl = torch.exp(torch.stack(nlls).sum() / test_dataset.n_samples)
 
@@ -99,6 +104,7 @@ def llama_eval(model, testenc, dev):
     model.eval()
     testenc = testenc.input_ids
     nsamples = testenc.numel() // model.seqlen
+    # nsamples = int(nsamples * 0.1) # debug
     layers = model.model.layers
 
     model.model.embed_tokens = model.model.embed_tokens.to(dev)

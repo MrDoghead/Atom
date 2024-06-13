@@ -38,13 +38,13 @@ class LlamaOmacDist:
         self.dist = {}
         for i in range(n_layers):
             self.dist[i] = {
-                "q_proj":    [Counter(), Counter()],
-                "k_proj":    [Counter(), Counter()],
-                "v_proj":    [Counter(), Counter()],
-                "o_proj":    [Counter(), Counter()],
-                "gate_proj": [Counter(), Counter()],
-                "up_proj":   [Counter(), Counter()],
-                "down_proj": [Counter(), Counter()],
+                "q_proj":    [Counter(), Counter(), Counter()],
+                "k_proj":    [Counter(), Counter(), Counter()],
+                "v_proj":    [Counter(), Counter(), Counter()],
+                "o_proj":    [Counter(), Counter(), Counter()],
+                "gate_proj": [Counter(), Counter(), Counter()],
+                "up_proj":   [Counter(), Counter(), Counter()],
+                "down_proj": [Counter(), Counter(), Counter()],
             }
         self.module_map = {
                 0: "q_proj",
@@ -58,13 +58,13 @@ class LlamaOmacDist:
 
     def plot_dist(self, n_layers):
         n_proj = self.n_proj
-        plt.figure(figsize=(n_proj*2*5, n_layers*5))
+        plt.figure(figsize=(n_proj*3*5, n_layers*5))
         for i in range(n_layers):
             for j in range(n_proj):
-                idx = i * n_proj * 2 + j * 2 + 1
+                idx = i * n_proj * 3 + j * 3 + 1
                 # plot inputs
                 items1, counts1 = zip(*self.dist[i][self.module_map[j]][0].items())
-                plt.subplot(n_layers, n_proj*2, idx)
+                plt.subplot(n_layers, n_proj*3, idx)
                 plt.bar(items1, counts1, color='blue')
                 plt.title(f'layer-{i} {self.module_map[j]} input')
                 plt.xlabel('Val')
@@ -72,9 +72,17 @@ class LlamaOmacDist:
 
                 # plot weights
                 items2, counts2 = zip(*self.dist[i][self.module_map[j]][1].items())
-                plt.subplot(n_layers, n_proj*2, idx+1)
+                plt.subplot(n_layers, n_proj*3, idx+1)
                 plt.bar(items2, counts2, color='red')
                 plt.title(f'layer-{i} {self.module_map[j]} weight')
+                plt.xlabel('Val')
+                plt.ylabel('Freq')
+
+                # plot outputs
+                items3, counts3 = zip(*self.dist[i][self.module_map[j]][2].items())
+                plt.subplot(n_layers, n_proj*3, idx+2)
+                plt.bar(items3, counts3, color='green')
+                plt.title(f'layer-{i} {self.module_map[j]} output')
                 plt.xlabel('Val')
                 plt.ylabel('Freq')
 
@@ -100,6 +108,8 @@ class LlamaOmacDist:
 # ...matrix-by-row...
 # weight shape0 shape1
 # ...matrix-by-row...
+# output shape0 shape1
+# ...matrix-by-row...
 # }
 def omac_dist(log_file, first_n_layers=0):
     dist = LlamaOmacDist(n_layers=32)
@@ -109,6 +119,7 @@ def omac_dist(log_file, first_n_layers=0):
     fill_idx = 0
     x = None
     w = None
+    o = None
     timestamp = 0
     with open(log_file, "r") as f:
         while True:
@@ -136,20 +147,29 @@ def omac_dist(log_file, first_n_layers=0):
                 block_idx = 0   # start count blocks
                 x = None
                 w = None
-                x_shape0, x_shape1 = 0, 0
-                w_shape0, w_shape1 = 0, 0
+                o = None
+                x_shape0 = 0
+                w_shape0 = 0
+                o_shape0 = 0
                 continue
             if "input" in line:
                 item = line.strip().split()
-                x_shape0, x_shape1 = int(item[1]), int(item[2])
+                x_shape0 = int(item[1])
                 x = Counter()
                 fill_idx = 0
                 block_idx += 1
                 continue
             if "weight" in line:
                 item = line.strip().split()
-                w_shape0, w_shape1 = int(item[1]), int(item[2])
+                w_shape0 = int(item[1])
                 w = Counter()
+                fill_idx = 0
+                block_idx += 1
+                continue
+            if "output" in line:
+                item = line.strip().split()
+                o_shape0 = int(item[1])
+                o = Counter()
                 fill_idx = 0
                 block_idx += 1
                 continue
@@ -167,6 +187,13 @@ def omac_dist(log_file, first_n_layers=0):
                 fill_idx += 1
                 if fill_idx == w_shape0:
                     dist.dist[decode_layer_idx][proj][1].update(Counter(w))
+            if isinstance(o, Counter):
+                item = line.strip().split()
+                arr = [int(k) for k in item]
+                o.update(Counter(arr))
+                fill_idx += 1
+                if fill_idx == o_shape0:
+                    dist.dist[decode_layer_idx][proj][2].update(Counter(o))
     dist.plot_dist(n_layers=first_n_layers)
 
 

@@ -81,7 +81,7 @@ if __name__ == '__main__':
         help='LlaMa model to load; pass location of hugginface converted checkpoint.'
     )
     parser.add_argument(
-        'dataset', type=str, choices=['wikitext2', 'ptb', 'c4'],
+        'dataset', type=str, choices=['wikitext2', 'ptb', 'c4', 'pileval'],
         help='Where to extract calibration data from.'
     )
     parser.add_argument(
@@ -119,7 +119,7 @@ if __name__ == '__main__':
         help='Whether to perform static quantization (For activtions). Default is dynamic. (Deprecated in Atom)'
     )
     parser.add_argument(
-        '--weight_group_size', type=int, default=0, choices=[0, 32, 64, 128, 256, 384, 768],
+        '--weight_group_size', type=int, default=0, choices=[0, 16, 32, 64, 128, 256, 384, 768],
         help='Group size when quantizing weights. Using 128 as default quantization group.'
     )
     parser.add_argument(
@@ -127,7 +127,7 @@ if __name__ == '__main__':
         help='Group size of channels that will quantize together. (only for weights now)'
     )
     parser.add_argument(
-        '--act_group_size', type=int, default=0, choices=[0, 64, 128, 256, 384, 768],
+        '--act_group_size', type=int, default=0, choices=[0, 16, 32, 64, 128, 256, 384, 768],
         help='Group size when quantizing activations. Using 128 as default quantization group.'
     )
     parser.add_argument(
@@ -224,14 +224,16 @@ if __name__ == '__main__':
         args.distributed_backend = "nccl"
         _initialize_distributed(args)
         global_var.init_multi_simulator()
-    print("args:", args)
+    if torch.distributed.get_rank() == 0:
+        print("args:", args)
 
     model_name = args.model.lower().split('/')[-1]
     assert model_name != None, "Please check the model path."
 
     if "llama" in args.model.lower():
-        # model = get_llama(args.model)
-        # model.eval()
+        if not args.load_qmodel:
+            model = get_llama(args.model)
+            model.eval()
         get_act_stats_func = get_act_stats_llama
         reorder_model_func = reorder_model_llama
         add_act_quant_wrapper_func = add_act_quant_wrapper_llama
@@ -327,14 +329,15 @@ if __name__ == '__main__':
     if args.eval_ppl:
         # datasets = ['wikitext2', 'ptb', 'c4', 'ptb-new', 'c4-new']
         #datasets = ['wikitext2', 'ptb', 'c4']
-        datasets = ['c4']
+        datasets = ['wikitext2']
+        #datasets = ['c4']
 
         for dataset in datasets:
             dataloader, testloader = get_loaders(
                 dataset, seed=args.seed, model=args.model, seqlen=model.seqlen, test_only=True
             )
             print(f"Evaluating {dataset} ...")
-            ppl = eval_func(model, testloader, DEV)
+            ppl = eval_func(model, testloader)
 
             print(f"targetResult,{dataset},{ppl:.3f}")
     

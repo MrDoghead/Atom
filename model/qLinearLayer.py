@@ -3,6 +3,14 @@ import torch.nn as nn
 from quant import fake_quantize_quarter_E5M2, fake_quantize_quarter_E4M3, quantize_gptq, quantize_tensor, quantize_tensor_channel_group
 import global_var
 
+def find_layers(module, layers=[nn.Conv2d, nn.Linear], name=''):
+    if type(module) in layers:
+        return {name: module}
+    res = {}
+    for name1, child in module.named_children():
+        res.update(find_layers(child, layers=layers, name=name + '.' + name1 if name != '' else name1))
+    return res
+
 def find_qlinear_layers(module, name=''):
     if type(module) == QLinearLayer:
         return {name: module}
@@ -33,6 +41,8 @@ class QLinearLayer(nn.Module):
         self.maxq = 0
         self.channel_group = 0
         self.group_size = 0
+        self.n_out = 0
+        self.n_nonout = 0
 
     @torch.no_grad
     def bmm_4bit(self, x, w, simu="ideal"):
@@ -42,7 +52,33 @@ class QLinearLayer(nn.Module):
         elif simu == "physical":
             # outputs, _ = global_var._simulator_instance(x=x.unsqueeze(0).to(torch.int32), y=w.unsqueeze(0).to(torch.int32), inputType="int4", seed=None)
             outputs = global_var._simulator_instance(x=x.unsqueeze(0).to(torch.int32), y=w.unsqueeze(0).to(torch.int32).contiguous(), inputType="int4", seed=None)
-            return outputs.squeeze(0)
+            if global_var.debug:
+                file_name = global_var._simulator_instance.instFolder.split("/")[-1]
+                with open(f"./logs/omac_{file_name}.txt", "a") as f:
+                    _x = x.to(torch.int32)
+                    _w = w.to(torch.int32)
+                    _o = outputs[0]
+                    input_str = f"input {_x.shape[0]} {_x.shape[1]}\n"
+                    for i in range(_x.shape[0]):
+                        for j in range(_x.shape[1]):
+                            input_str += str(_x[i][j].cpu().numpy()) + " "
+                        input_str += "\n"
+                    weight_str = f"weight {_w.shape[0]} {_w.shape[1]}\n"
+                    for i in range(_w.shape[0]):
+                        for j in range(_w.shape[1]):
+                            weight_str += str(_w[i][j].cpu().numpy()) + " "
+                        weight_str += "\n"
+                    output_str = f"output {_o.shape[0]} {_o.shape[1]}\n"
+                    for i in range(_o.shape[0]):
+                        for j in range(_o.shape[1]):
+                            output_str += str(_o[i][j].cpu().numpy()) + " "
+                        output_str += "\n"
+                    full_str = input_str + weight_str + output_str
+                    f.write(full_str)
+                    global_var.count_log += 1
+                if global_var.count_log % 10 == 0:
+                    print(f"Count_block: {global_var.count_log}")
+            return outputs[0].squeeze(0)
         else:
             return torch.matmul(x, w)
 
@@ -60,7 +96,7 @@ class QLinearLayer(nn.Module):
         bs, seqlen, hidden_dim = x.shape
         x = x.squeeze(0)
         W = self.weight.T
-        n_nonout = hidden_dim - self.args.keeper
+        n_nonout = self.n_nonout
         inp_scales_lo = inp_scales_lo.reshape(seqlen, -1)
         # inp_base_lo = inp_base_lo.reshape(seqlen, -1)
 
@@ -119,7 +155,7 @@ class QLinearLayer(nn.Module):
         
         W = self.weight.data.clone()
         Q = torch.zeros_like(W)
-        n_nonout = W.shape[1] - self.args.keeper
+        n_nonout = self.n_nonout
         for i1 in range(0, n_nonout, blocksize):
             i2 = min(i1 + blocksize, n_nonout)
             count = i2 - i1
@@ -140,7 +176,7 @@ class QLinearLayer(nn.Module):
             Q[:, i1:i2] = Q1
 
         if self.args.keeper > 0:
-            keep_w = self.weight[:, -self.args.keeper:].clone().contiguous()
+            keep_w = self.weight[:, -self.n_out:].clone().contiguous()
         
         # Whether to keep outliers in FP8
         # for outliers, groupsize=0
@@ -154,7 +190,7 @@ class QLinearLayer(nn.Module):
             elif self.args.keeper_precision == 3:
                 keep_w = torch.clamp(torch.round(keep_w / self.keep_scales) + self.keep_zeros, -128, 127)
 
-        Q[:, -self.args.keeper:] = keep_w
+        Q[:, -self.n_out:] = keep_w
         self.weight = Q.reshape(self.weight.shape).to(self.weight.data.dtype)
         del keep_w
     

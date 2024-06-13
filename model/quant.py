@@ -278,6 +278,9 @@ def quantize_activation_wrapper(x: torch.tensor, args, real_quant=False) -> torc
     if args.abits >= 16:
         return x 
     
+    n_nonout = x.shape[-1] - args.keeper if x.shape[-1] == 4096 else 4096-args.keeper
+    n_out = x.shape[-1] - n_nonout
+    
     if real_quant:
         qFunction = partial(
             quantize_tensor_real, 
@@ -303,7 +306,7 @@ def quantize_activation_wrapper(x: torch.tensor, args, real_quant=False) -> torc
     assert args.act_group_size == 0 or (savedShape[-1]) % args.act_group_size == 0, "Group size should be divisible by (dim - keeper)."
 
     if args.keeper > 0:
-        saved_x = x[:, -args.keeper:].clone().contiguous() 
+        saved_x = x[:, -n_out:].clone().contiguous() 
     
     # Whether to keep outliers in FP8 
     if args.keeper and args.keeper_precision > 0:
@@ -319,7 +322,7 @@ def quantize_activation_wrapper(x: torch.tensor, args, real_quant=False) -> torc
                 saved_x = quantize_tensor(saved_x, n_bits=8, group_size=0, tiling=0, sym=True, exponential=False)
 
     if args.keeper > 0:
-        x[:, -args.keeper:] = 0
+        x[:, -n_out:] = 0
 
     if real_quant:
         x, scales_lo, base_lo = qFunction(x)
@@ -327,7 +330,7 @@ def quantize_activation_wrapper(x: torch.tensor, args, real_quant=False) -> torc
         x = qFunction(x)
 
     if args.keeper > 0:
-        x[:, -args.keeper:] = saved_x
+        x[:, -n_out:] = saved_x
         del saved_x
 
     if real_quant:

@@ -6,6 +6,7 @@ from collections import defaultdict
 from pprint import pprint
 from modelutils_llama import quantize_model_llama, reorder_model_llama, quantize_model_gptq_llama,  add_act_quant_wrapper_llama, requantize_model_llama
 from modelutils_opt import quantize_model_opt, reorder_model_opt, quantize_model_gptq_opt,  add_act_quant_wrapper_opt
+# from modelutils_mixtral import quantize_model_mixtral, add_act_quant_wrapper_mixtral, reorder_model_mixtral
 from parallel_utils import map_layers_to_multi_gpus
 from LMClass import LMClass
 import os
@@ -45,6 +46,17 @@ def get_opt(model):
     model.seqlen = model.config.max_position_embeddings
     return model
 
+def get_mixtral(model):
+    import torch
+    def skip(*args, **kwargs):
+        pass
+    torch.nn.init.kaiming_uniform_ = skip
+    torch.nn.init.uniform_ = skip
+    torch.nn.init.normal_ = skip
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    model = AutoModelForCausalLM.from_pretrained(model, torch_dtype=torch.float16)
+    model.seqlen = 2048
+    return model
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -54,7 +66,7 @@ if __name__ == '__main__':
         help='LlaMa model to load; pass location of hugginface converted checkpoint.'
     )
     parser.add_argument(
-        'dataset', type=str, choices=['wikitext2', 'ptb', 'c4'],
+        'dataset', type=str, choices=['wikitext2', 'ptb', 'c4', 'pileval'],
         help='Where to extract calibration data from.'
     )
     parser.add_argument(
@@ -188,6 +200,10 @@ if __name__ == '__main__':
         help='Whether to apply real quantize.'
     )
     parser.add_argument(
+        "--observe", action="store_true",
+        help='Whether to observe the quantization data.'
+    )
+    parser.add_argument(
         "--text_completion", action="store_true",
         help="run text complication on omac"
     )
@@ -220,6 +236,7 @@ if __name__ == '__main__':
         help="run chatbot interface"
     )
 
+
     args = parser.parse_args()
     print("args:", args)
     # global_var.init_ideal_simulator()
@@ -245,6 +262,14 @@ if __name__ == '__main__':
         quantize_model_gptq_func = quantize_model_gptq_opt
         quantize_model_func = quantize_model_opt
         eval_func = opt_eval
+    elif "mixtral" in args.model.lower():
+        model = get_mixtral(args.model)
+        get_act_stats_func = get_act_stats_llama
+        reorder_model_func = reorder_model_mixtral
+        add_act_quant_wrapper_func = add_act_quant_wrapper_mixtral
+        quantize_model_gptq_func = quantize_model_gptq_llama
+        quantize_model_func = quantize_model_mixtral
+        eval_func = llama_eval
     model.eval()
 
     if args.reorder and args.load_qmodel=='':
@@ -310,31 +335,34 @@ if __name__ == '__main__':
             else:
                 model = quantize_model_func(model, device=DEV, args=args)
         # save model
-        if (args.abits < 16 or args.wbits < 16) and args.save_dir:
+        if (args.abits < 16 or args.wbits < 16) and args.save_dir and not args.real_quant:
             print(f"full qmodel is saved at {args.save_dir}/")
             torch.save(model, f'{args.save_dir}/{model_name}_w{args.wbits}a{args.abits}_{args.dataset}.pt')
     else:
         print(f"load qmodel from {args.load_qmodel}")
-        # model = torch.load(args.load_qmodel)
+        model = torch.load(args.load_qmodel)
 
-    if args.real_quant and not args.load_qmodel:
+    if args.real_quant and "fake4bit" not in args.load_qmodel:
         assert "llama" in args.model.lower(), "only support llama"
         model = requantize_model_llama(model, device=DEV, args=args)
         torch.save(model, f'{args.save_dir}/{model_name}_w{args.wbits}a{args.abits}_{args.dataset}_fake4bit.pt')
-        exit()
+        # exit()
     
     if args.eval_ppl:
         # datasets = ['wikitext2', 'ptb', 'c4', 'ptb-new', 'c4-new']
         #datasets = ['wikitext2', 'ptb', 'c4']
         datasets = ['wikitext2']
 
+        for layer in model.model.layers:
+            layer.real_quant = args.real_quant
+
         for dataset in datasets:
             dataloader, testloader = get_loaders(
                 dataset, seed=args.seed, model=args.model, seqlen=model.seqlen, test_only=True
             )
             print(f"Evaluating {dataset} ...")
-            ppl = eval_func(model, testloader, DEV)
-            # ppl = eval_func2(model, testloader)
+            # ppl = eval_func(model, testloader, DEV) # by layers
+            ppl = eval_func2(model, testloader) # by data
 
             print(f"targetResult,{dataset},{ppl:.3f}")
     
@@ -415,7 +443,16 @@ if __name__ == '__main__':
                 layer.real_quant = args.real_quant
 
             prompts = args.text
+            # prompt_template=f'''[INST] <<SYS>>
+            # You are a helpful, respectful and honest assistant. 
+            # Always answer as helpfully as possible, while being safe.  
+            # If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. 
+            # If you don't know the answer to a question, please don't share false information.
+            # <</SYS>>
+            # {prompts}[/INST]
+            # '''
             print(f"Prompts: {prompts}")
+            # prompts = prompt_template
             input_ids = tokenizer.encode(prompts, return_tensors="pt").cuda()
             assert len(input_ids) < args.max_seq_len
             model.eval()
@@ -430,6 +467,14 @@ if __name__ == '__main__':
                     top_p=args.top_p,
                     temperature=args.temperature,
                 )
+                # generate_ids = model.generate(
+                #     input_ids,
+                #     num_beams=10,
+                #     num_return_sequences=1,
+                #     no_repeat_ngram_size=1,
+                #     remove_invalid_values=True,
+                # )
+                
             torch.cuda.synchronize()
             end_time = time.perf_counter()
             dur_time = end_time - start_time
