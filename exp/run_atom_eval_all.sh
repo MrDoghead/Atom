@@ -1,7 +1,6 @@
 #!/bin/bash
 # path to the Llama model 
 MODEL=/data/models/Llama-2-7b-hf
-QMODEL=/data/models/atom_real/llama-2-7b-hf_w4a4_wikitext2_fake4bit.pt
 
 # what calibaration dataset to use
 CALIB_DATA=wikitext2
@@ -11,20 +10,21 @@ BIT=4
 # arguments to produce results in the paper
 cmd_base="--wbits ${BIT} --abits ${BIT} --a_sym --w_sym"
 cmd_group="--act_group_size 128 --weight_group_size 128 --weight_channel_group 2"
+# cmd_reorder="--reorder --act_sort_metric hessian"
 cmd_reorder="--reorder --act_sort_metric hessian --cache_index"
 cmd_clip="--a_clip_ratio 0.9 --w_clip_ratio 0.85 --kv_clip_ratio 1.0"
 cmd_adv="--keeper 128 --keeper_precision 3 --kv_cache --use_gptq"
-cmd_eval="--eval_ppl --real_quant --parallel"
-cmd_save="--save_dir /data/models/atom_real --load_qmodel ${QMODEL}"
+cmd_eval="--eval_ppl --eval_common_sense --lm_eval_limit -1 --multigpu"
+cmd_save="--save_dir /data/models/atom_real"
 
 dir=$(pwd)
-resultFile=$dir/logs/atom_llama_ppl.csv
+resultFile=$dir/atom_llama_ppl.csv
 
-logFile=$dir/logs/atom_llama2_w${BIT}a${BIT}_ppl.log
+logFile=$dir/atom_llama2_w${BIT}a${BIT}.log
 touch $logFile
 
-CUDA_VISIBLE_DEVICES=2,4,5,7  torchrun --standalone --nnodes=1 --nproc_per_node=4 ${dir}/model/main_dp.py ${MODEL} ${CALIB_DATA} \
-    ${cmd_base} ${cmd_group} ${cmd_reorder} ${cmd_clip} ${cmd_adv} ${cmd_eval} ${cmd_save} \
+CUDA_VISIBLE_DEVICE=0,1,2,3 python ${dir}/model/llama.py ${MODEL} ${CALIB_DATA} \
+    ${cmd_base} ${cmd_group} ${cmd_reorder} ${cmd_clip} ${cmd_adv} ${cmd_eval} \
     2>&1 | tee ${logFile}
 
 # parse ppl results
